@@ -1,0 +1,75 @@
+.. SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+.. SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+..
+.. NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+.. property and proprietary rights in and to this material, related
+.. documentation and any modifications thereto. Any use, reproduction,
+.. disclosure or distribution of this material and related documentation
+.. without an express license agreement from NVIDIA CORPORATION or
+.. its affiliates is strictly prohibited.
+
+C: Minimal Example
+==================
+
+This example shows basic initialization of the renderer, rendering a single frame from an RGB camera, mapping the output and writing the result to disk as a PNG.
+
+The example will load an example scene from S3 and output the resulting image to ``out.png``.
+
+The first time the example is run, driver shader compilation will be performed and cached. Subsequent runs will be much faster.
+
+.. image:: ../../img/out.jpg
+   :alt: Minimal example output
+   :align: center
+
+Linux
+-----
+
+Prerequisites
+^^^^^^^^^^^^^
+
+.. code-block:: bash
+
+   sudo apt install build-essential cmake
+
+Building
+^^^^^^^^
+
+.. code-block:: bash
+
+   cmake -B build -DCMAKE_BUILD_TYPE=Release
+   cmake --build build
+
+Running
+^^^^^^^
+
+.. code-block:: bash
+
+   ./build/minimal
+
+Windows
+-------
+
+Prerequisites
+^^^^^^^^^^^^^
+
+- `Visual Studio 2017+ <https://visualstudio.microsoft.com/downloads/>`_
+
+Building
+^^^^^^^^
+
+.. code-block:: pwsh
+
+   cmake -B build
+   cmake --build --config Release
+
+Running
+^^^^^^^
+
+.. code-block:: pwsh
+
+   .\build\Release\minimal
+
+Licensing
+---------
+
+This example contains ``stb_image_write.h``, © Sean Barrett, released under Public Domain.

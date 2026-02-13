@@ -1,0 +1,8 @@
+# Python dependencies for ovrtx tests
+# Install with: python -m pip install -r requirements.txt
+#
+
+pytest==9.0.2
+Pillow==12.1.1
+numpy>=2.2,<2.3
+warp-lang==1.11.1

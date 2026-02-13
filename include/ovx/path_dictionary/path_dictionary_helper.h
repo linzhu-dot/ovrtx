@@ -1,0 +1,25 @@
+/* Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+ *
+ * NVIDIA CORPORATION and its licensors retain all intellectual property
+ * and proprietary rights in and to this software, related documentation
+ * and any modifications thereto.  Any use, reproduction, disclosure or
+ * distribution of this software and related documentation without an express
+ * license agreement from NVIDIA CORPORATION is strictly prohibited.
+ */
+
+#ifndef PATH_DICTIONARY_HELPER_H
+#define PATH_DICTIONARY_HELPER_H
+
+#include "path_dictionary_types.h"
+#include <stdbool.h>
+#include <stddef.h>
+
+/* Macro for creating ovx_string_t from string literals */
+#define literal_to_ovx_string(str) ovx_string_t{ (str), sizeof(str) - 1 }
+
+static inline bool is_ovx_string_empty(const ovx_string_t* str)
+{
+    return str->ptr == NULL || str->length == 0;
+}
+
+#endif /* PATH_DICTIONARY_HELPER_H */

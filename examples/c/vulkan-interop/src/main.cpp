@@ -1,0 +1,970 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+//
+// NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+// property and proprietary rights in and to this material, related
+// documentation and any modifications thereto. Any use, reproduction,
+// disclosure or distribution of this material and related documentation
+// without an express license agreement from NVIDIA CORPORATION or
+// its affiliates is strictly prohibited.
+
+#include <cuda.h>
+#include <ovrtx/ovrtx.h>
+#include <ovrtx/ovrtx_config.h>
+#include "cuda/cuda_kernel.hpp"
+#include "glsl/spirv_loader.hpp"
+#include "vk/vulkan_context.hpp"
+#include "camera/orbit_camera.hpp"
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#include <glm/gtc/type_ptr.hpp>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+#include <cstdio>
+#include <cmath>
+#include <chrono>
+#include <string>
+#include <string_view>
+#include <iostream>
+#include <cstring>
+#include <stdexcept>
+#include <filesystem>
+#include <vector>
+#include <algorithm>
+#include <tuple>
+
+// Get the directory containing the running executable (cross-platform).
+// Used to locate shaders and other resources relative to the binary.
+static auto get_executable_dir() -> std::filesystem::path {
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH];
+    DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) {
+        throw std::runtime_error("GetModuleFileNameW failed");
+    }
+    return std::filesystem::path(buf).parent_path();
+#elif defined(__linux__)
+    return std::filesystem::canonical("/proc/self/exe").parent_path();
+#else
+    #error "Unsupported platform"
+#endif
+}
+
+// Window dimensions
+constexpr int WINDOW_WIDTH = 1920;
+constexpr int WINDOW_HEIGHT = 1080;
+
+// Mouse state for orbit camera
+static bool g_mouse_pressed = false;
+static double g_last_mouse_x = 0.0;
+static double g_last_mouse_y = 0.0;
+static bool g_camera_dirty = false;
+static OrbitCamera* g_orbit_camera = nullptr;
+
+static void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    (void)window;
+    (void)mods;
+    
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        g_mouse_pressed = (action == GLFW_PRESS);
+    }
+}
+
+static void cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
+    (void)window;
+    
+    if (g_mouse_pressed && g_orbit_camera) {
+        float delta_x = static_cast<float>(xpos - g_last_mouse_x);
+        float delta_y = static_cast<float>(ypos - g_last_mouse_y);
+        
+        g_orbit_camera->update(delta_x, delta_y);
+        g_camera_dirty = true;
+    }
+    
+    g_last_mouse_x = xpos;
+    g_last_mouse_y = ypos;
+}
+
+static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    (void)window;
+    (void)xoffset;
+    
+    if (g_orbit_camera) {
+        // Dolly: scroll up = zoom in (decrease distance), scroll down = zoom out
+        float const dolly_factor = 0.1f;
+        float current_distance = g_orbit_camera->distance();
+        float new_distance = current_distance * (1.0f - static_cast<float>(yoffset) * dolly_factor);
+        
+        // Clamp to reasonable range (don't let it go negative or too close)
+        float const min_distance = 0.1f;
+        new_distance = std::max(new_distance, min_distance);
+        
+        g_orbit_camera->set_distance(new_distance);
+        g_camera_dirty = true;
+    }
+}
+
+// Scene units for distance scaling
+enum class Units { Centimeters, Meters };
+
+// Default scene configuration
+static constexpr char const* DEFAULT_USD_FILE_URL = "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Samples/Robot-OVRTX/robot-ovrtx.usda";
+static constexpr char const* DEFAULT_RENDER_PRODUCT_PATH = "/Render/Camera";
+static constexpr UpAxis DEFAULT_UP_AXIS = UpAxis::Z;
+static constexpr Units DEFAULT_SCENE_UNITS = Units::Meters;
+
+static void print_usage(char const* program_name) {
+    printf("Usage: %s [options]\n", program_name);
+    printf("\nOptions:\n");
+    printf("  --usd, -u <path>          USD file path or URL (default: robot-ovrtx sample)\n");
+    printf("  --render-product, -r <path>  Render product prim path (default: %s)\n", DEFAULT_RENDER_PRODUCT_PATH);
+    printf("  --up-axis, -a <Y|Z>       Scene up axis (default: Z)\n");
+    printf("  --units <meters|centimeters>  Scene units (default: meters)\n");
+    printf("  --num-frames, -n <N>      Render N frames then save out.png and exit\n");
+    printf("  --help, -h                Show this help message\n");
+}
+
+static bool parse_args(int argc, char* argv[],
+                       std::string& usd_file,
+                       std::string& render_product,
+                       UpAxis& up_axis,
+                       Units& units,
+                       int& num_frames) {
+    // Set defaults
+    usd_file = DEFAULT_USD_FILE_URL;
+    render_product = DEFAULT_RENDER_PRODUCT_PATH;
+    up_axis = DEFAULT_UP_AXIS;
+    units = DEFAULT_SCENE_UNITS;
+    num_frames = 0;
+    
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return false;
+        } else if (arg == "--usd" || arg == "-u") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg.c_str());
+                return false;
+            }
+            usd_file = argv[++i];
+        } else if (arg == "--render-product" || arg == "-r") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg.c_str());
+                return false;
+            }
+            render_product = argv[++i];
+        } else if (arg == "--up-axis" || arg == "-a") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg.c_str());
+                return false;
+            }
+            std::string val = argv[++i];
+            if (val == "Y" || val == "y") {
+                up_axis = UpAxis::Y;
+            } else if (val == "Z" || val == "z") {
+                up_axis = UpAxis::Z;
+            } else {
+                fprintf(stderr, "Error: invalid up-axis '%s', must be Y or Z\n", val.c_str());
+                return false;
+            }
+        } else if (arg == "--units") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg.c_str());
+                return false;
+            }
+            std::string val = argv[++i];
+            if (val == "meters" || val == "m") {
+                units = Units::Meters;
+            } else if (val == "centimeters" || val == "cm") {
+                units = Units::Centimeters;
+            } else {
+                fprintf(stderr, "Error: invalid units '%s', must be 'meters' or 'centimeters'\n", val.c_str());
+                return false;
+            }
+        } else if (arg == "--num-frames" || arg == "-n") {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires an argument\n", arg.c_str());
+                return false;
+            }
+            num_frames = std::stoi(argv[++i]);
+            if (num_frames <= 0) {
+                fprintf(stderr, "Error: --num-frames must be a positive integer\n");
+                return false;
+            }
+        } else {
+            fprintf(stderr, "Error: unknown option '%s'\n", arg.c_str());
+            print_usage(argv[0]);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+static void check_ovrtx_result(ovrtx_result_t result, char const* operation) {
+    if (result.status != OVRTX_API_SUCCESS) {
+        ovx_string_t error = ovrtx_get_last_error();
+        char error_msg[512];
+        if (error.ptr && error.length > 0) {
+            snprintf(error_msg, sizeof(error_msg), "ovrtx %s failed: %.*s", 
+                     operation, static_cast<int>(error.length), error.ptr);
+        } else {
+            snprintf(error_msg, sizeof(error_msg), "ovrtx %s failed", operation);
+        }
+        throw std::runtime_error(error_msg);
+    }
+}
+
+static void check_ovrtx_enqueue_result(ovrtx_enqueue_result_t result, char const* operation) {
+    if (result.status != OVRTX_API_SUCCESS) {
+        ovx_string_t error = ovrtx_get_last_error();
+        char error_msg[512];
+        if (error.ptr && error.length > 0) {
+            snprintf(error_msg, sizeof(error_msg), "ovrtx %s failed: %.*s", 
+                     operation, static_cast<int>(error.length), error.ptr);
+        } else {
+            snprintf(error_msg, sizeof(error_msg), "ovrtx %s failed", operation);
+        }
+        throw std::runtime_error(error_msg);
+    }
+}
+
+// Output type determines pixel format for CUDA-Vulkan interop
+enum class OutputType { HdrColor, LdrColor };
+
+static auto vulkan_format_for_output(OutputType type) -> VkFormat {
+    return (type == OutputType::HdrColor) 
+        ? VK_FORMAT_R16G16B16A16_SFLOAT 
+        : VK_FORMAT_R8G8B8A8_SRGB;
+}
+
+static auto cuda_format_for_output(OutputType type) -> CudaImageFormat {
+    return (type == OutputType::HdrColor) 
+        ? CudaImageFormat::Half4 
+        : CudaImageFormat::UInt8_4;
+}
+
+static auto output_type_name(OutputType type) -> char const* {
+    return (type == OutputType::HdrColor) ? "HdrColor" : "LdrColor";
+}
+
+// Search for color output in ovrtx results, preferring HdrColor over LdrColor
+// Returns the output handle and sets the output_type
+static auto find_color_output(
+    ovrtx_render_product_set_outputs_t const& outputs,
+    OutputType& output_type
+) -> ovrtx_rendered_output_handle_t {
+    ovrtx_rendered_output_handle_t hdr_handle = 0;
+    ovrtx_rendered_output_handle_t ldr_handle = 0;
+    
+    for (size_t i = 0; i < outputs.output_count; ++i) {
+        ovrtx_render_product_output_t const& product_output = outputs.outputs[i];
+        for (size_t f = 0; f < product_output.output_frame_count; ++f) {
+            ovrtx_render_product_frame_output_t const& frame = product_output.output_frames[f];
+            for (size_t v = 0; v < frame.render_var_count; ++v) {
+                ovrtx_render_product_render_var_output_t const& var = frame.output_render_vars[v];
+                if (!var.render_var_name.ptr) continue;
+                
+                if (strncmp(var.render_var_name.ptr, "HdrColor", var.render_var_name.length) == 0) {
+                    hdr_handle = var.output_handle;
+                } else if (strncmp(var.render_var_name.ptr, "LdrColor", var.render_var_name.length) == 0) {
+                    ldr_handle = var.output_handle;
+                }
+            }
+        }
+    }
+    
+    // Prefer HdrColor, fall back to LdrColor
+    if (hdr_handle != 0) {
+        output_type = OutputType::HdrColor;
+        return hdr_handle;
+    } else if (ldr_handle != 0) {
+        output_type = OutputType::LdrColor;
+        return ldr_handle;
+    }
+    
+    return 0;  // Not found
+}
+
+int main(int argc, char* argv[]) {
+    // Parse command-line arguments
+    std::string usd_file_path;
+    std::string render_product_path;
+    UpAxis up_axis;
+    Units units;
+    int num_frames = 0;
+    
+    if (!parse_args(argc, argv, usd_file_path, render_product_path, up_axis, units, num_frames)) {
+        return 0;  // Help was shown or parse error
+    }
+    
+    printf("USD file: %s\n", usd_file_path.c_str());
+    printf("Render product: %s\n", render_product_path.c_str());
+    printf("Up axis: %s\n", up_axis == UpAxis::Y ? "Y" : "Z");
+    printf("Units: %s\n", units == Units::Meters ? "meters" : "centimeters");
+    
+    // =========================================================================
+    // Initialize ovrtx
+    // =========================================================================
+    printf("Initializing ovrtx...\n");
+    
+    ovrtx_config_t ovrtx_config = {};
+    ovrtx_result_t result = ovrtx_initialize(&ovrtx_config);
+    check_ovrtx_result(result, "initialize");
+    
+    ovrtx_renderer_t* renderer = nullptr;
+    result = ovrtx_create_renderer(&ovrtx_config, &renderer);
+    if (result.status != OVRTX_API_SUCCESS) {
+        ovrtx_shutdown();
+        check_ovrtx_result(result, "create_renderer");
+    }
+    
+    printf("Loading USD scene: %s\n", usd_file_path.c_str());
+    
+    // Load USD file
+    ovrtx_usd_input_t usd_input = {};
+    usd_input.usd_file_path.ptr = usd_file_path.c_str();
+    usd_input.usd_file_path.length = usd_file_path.size();
+    
+    ovx_string_t prefix = {};
+    prefix.ptr = "";
+    prefix.length = 0;
+    
+    ovrtx_usd_handle_t usd_handle = 0;
+    ovrtx_enqueue_result_t enqueue_result = ovrtx_add_usd(renderer, usd_input, prefix, &usd_handle);
+    check_ovrtx_enqueue_result(enqueue_result, "add_usd");
+    
+    ovrtx_op_wait_result_t wait_result = {};
+    result = ovrtx_wait_op(renderer, enqueue_result.op_index, ovrtx_timeout_infinite, &wait_result);
+    if (wait_result.num_error_ops > 0) {
+        for (int i = 0; i < wait_result.num_error_ops; ++i) {
+            ovx_string_t error_string = ovrtx_get_last_op_error(wait_result.error_op_ids[i]);
+            std::cerr << "ERROR: " << std::string_view(error_string.ptr, error_string.length) << std::endl;
+        }
+
+        ovrtx_destroy_renderer(renderer);
+        ovrtx_shutdown();
+        return 1;
+    }
+    check_ovrtx_result(result, "wait_op (add_usd)");
+    
+    printf("USD scene loaded successfully\n");
+    printf("Render product path: %s\n", render_product_path.c_str());
+    
+    // Get CUDA context and device UUID (ovrtx already initialized CUDA)
+    CUuuid cuda_uuid;
+    if (!cuda_init(&cuda_uuid)) {
+        fprintf(stderr, "Failed to get CUDA context\n");
+        return 1;
+    }
+    
+    // =========================================================================
+    // Do an initial ovrtx step to get render dimensions
+    // =========================================================================
+    ovx_string_t render_product_str = {};
+    render_product_str.ptr = render_product_path.c_str();
+    render_product_str.length = render_product_path.size();
+    
+    ovrtx_render_product_set_t render_products = {};
+    render_products.render_products = &render_product_str;
+    render_products.num_render_products = 1;
+    
+    ovrtx_step_result_handle_t step_result_handle = 0;
+    enqueue_result = ovrtx_step(renderer, render_products, 0.0, &step_result_handle);
+    check_ovrtx_enqueue_result(enqueue_result, "step");
+    
+    ovrtx_render_product_set_outputs_t outputs = {};
+    result = ovrtx_fetch_results(renderer, step_result_handle, ovrtx_timeout_infinite, &outputs);
+    check_ovrtx_result(result, "fetch_results");
+    
+    if (outputs.status != OVRTX_EVENT_COMPLETED || outputs.output_count == 0) {
+        std::cerr << "Could not get dimensions for RenderProduct \"" <<  render_product_path << "\"" << std::endl;
+        ovrtx_destroy_results(renderer, step_result_handle);
+        ovrtx_destroy_renderer(renderer);
+        ovrtx_shutdown();
+        return 3;
+    }
+    
+    // Find color output (prefer HdrColor, fall back to LdrColor)
+    OutputType output_type;
+    ovrtx_rendered_output_handle_t color_output_handle = find_color_output(outputs, output_type);
+    if (color_output_handle == 0) {
+        throw std::runtime_error("No color output found (HdrColor or LdrColor)");
+    }
+    printf("Using %s output\n", output_type_name(output_type));
+    
+    // Map to get dimensions
+    ovrtx_map_output_description_t map_desc = {};
+    map_desc.device_type = OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY;
+    map_desc.sync_stream = 0;
+    
+    ovrtx_rendered_output_t rendered_output = {};
+    result = ovrtx_map_rendered_output(renderer, color_output_handle, &map_desc, ovrtx_timeout_infinite, &rendered_output);
+    check_ovrtx_result(result, "map_rendered_output");
+    
+    DLTensor const& dl = rendered_output.buffer.dl;
+    int tex_width = static_cast<int>(dl.shape[1]);
+    int tex_height = static_cast<int>(dl.shape[0]);
+    
+    // Unmap and destroy initial step results (no copy, so no sync needed)
+    result = ovrtx_unmap_rendered_output(renderer, rendered_output.map_handle, ovrtx_cuda_sync_t{});
+    check_ovrtx_result(result, "unmap_rendered_output");
+    result = ovrtx_destroy_results(renderer, step_result_handle);
+    check_ovrtx_result(result, "destroy_results");
+    
+    printf("Render output dimensions: %d x %d\n", tex_width, tex_height);
+    
+    // =========================================================================
+    // Initialize GLFW and create window
+    // =========================================================================
+    if (!glfwInit()) {
+        fprintf(stderr, "Failed to initialize GLFW\n");
+        return 1;
+    }
+    
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    
+    GLFWwindow* window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "ovrtx-Vulkan Interop", nullptr, nullptr);
+    if (!window) {
+        fprintf(stderr, "Failed to create window\n");
+        glfwTerminate();
+        return 1;
+    }
+    
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetCursorPosCallback(window, cursor_position_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+    
+    // Create orbit camera
+    // Start with a decent framing on the robot
+    // Scale camera distance based on scene units (centimeters need 100x scale)
+    float unit_scale = (units == Units::Centimeters) ? 100.0f : 1.0f;
+    float distance = 5.0f * unit_scale;  // 5 meters or 500 centimeters
+    float azimuth = glm::radians(290.0f);
+    float elevation = std::asin(0.5f / 5.0f);  // camera at ~1.5m looking at 1m target
+    glm::vec3 target(0.0f, 0.0f, 1.0f);  // 1 meter above ground (Z-up)
+    OrbitCamera orbit_camera(distance, azimuth, elevation, target, up_axis);
+    g_orbit_camera = &orbit_camera;
+    g_camera_dirty = true;
+    
+    // Scope for VulkanContext
+    {
+        VulkanContextConfig vk_config;
+        vk_config.window = window;
+        vk_config.initial_sampled_image_capacity = 16;
+        
+        VulkanContext vk(vk_config, cuda_uuid);
+        
+        // Create double-buffered shared images for CUDA interop
+        constexpr int SHARED_IMAGE_COUNT = 2;
+        VkFormat vk_format = vulkan_format_for_output(output_type);
+        CudaImageFormat cuda_format = cuda_format_for_output(output_type);
+        
+        SampledImageHandle shared_images[SHARED_IMAGE_COUNT];
+        for (int i = 0; i < SHARED_IMAGE_COUNT; ++i) {
+            shared_images[i] = vk.create_sampled_image(tex_width, tex_height,
+                                                        vk_format,
+                                                        VK_FILTER_LINEAR, true);
+        }
+        
+        // Load precompiled SPIR-V shaders from next to the executable
+        std::filesystem::path shader_dir = get_executable_dir() / "shaders";
+        std::string vert_path = (shader_dir / "fullscreen.vert.spv").string();
+        std::string frag_path = (shader_dir / "fullscreen.frag.spv").string();
+        std::vector<uint32_t> vert_spirv = load_spirv(vert_path);
+        std::vector<uint32_t> frag_spirv = load_spirv(frag_path);
+        
+        printf("Loaded shaders: vertex=%zu words, fragment=%zu words\n", 
+               vert_spirv.size(), frag_spirv.size());
+        
+        auto [vert_shader, frag_shader] = vk.create_linked_vertex_and_fragment_shaders(vert_spirv, frag_spirv);
+        
+        // Transition shared images to GENERAL layout for CUDA writes
+        for (int i = 0; i < SHARED_IMAGE_COUNT; ++i) {
+            VkImage shared_img = vk.sampled_image(shared_images[i]).image;
+            vk.immediate_submit([shared_img](CommandBuffer cmd) {
+                cmd.image_memory_barrier(shared_img, VK_IMAGE_ASPECT_COLOR_BIT,
+                                         VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                                         VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+            });
+        }
+        
+        // Export memory to CUDA
+        CUsurfObject cuda_surfaces[SHARED_IMAGE_COUNT];
+        for (int i = 0; i < SHARED_IMAGE_COUNT; ++i) {
+            SampledImage const& img = vk.sampled_image(shared_images[i]);
+            auto memory_handle = vk.export_memory_handle(shared_images[i]);
+            cuda_surfaces[i] = cuda_import_vulkan_image(i, memory_handle, img.size, tex_width, tex_height, cuda_format);
+            if (cuda_surfaces[i] == 0) {
+                fprintf(stderr, "Failed to import Vulkan image %d into CUDA\n", i);
+                return 1;
+            }
+        }
+        
+        auto timeline_handle = vk.export_timeline_semaphore_handle();
+        cuda_import_timeline_semaphore(timeline_handle);
+        
+        // Create CUDA stream and events
+        CUstream cuda_stream;
+        cuStreamCreate(&cuda_stream, 0);
+        
+        CUevent cuda_start_event, cuda_end_event, cuda_frame_done_event, cuda_copy_done_event;
+        cuEventCreate(&cuda_start_event, CU_EVENT_DEFAULT);
+        cuEventCreate(&cuda_end_event, CU_EVENT_DEFAULT);
+        cuEventCreate(&cuda_frame_done_event, CU_EVENT_DISABLE_TIMING);
+        cuEventCreate(&cuda_copy_done_event, CU_EVENT_DISABLE_TIMING);
+        
+        // Double-buffer state
+        int write_idx = 0;
+        int read_idx = 0;
+        uint64_t cuda_frame_counter = 0;
+        bool cuda_work_pending = false;
+        
+        // ovrtx step state
+        ovrtx_step_result_handle_t current_step_result = 0;
+        ovrtx_rendered_output_map_handle_t current_map_handle = 0;
+        bool has_mapped_output = false;
+        
+        // =====================================================================
+        // Prime the first buffer
+        // =====================================================================
+        printf("Priming first frame...\n");
+        {
+            enqueue_result = ovrtx_step(renderer, render_products, 0.0, &current_step_result);
+            check_ovrtx_enqueue_result(enqueue_result, "step");
+            
+            result = ovrtx_fetch_results(renderer, current_step_result, ovrtx_timeout_infinite, &outputs);
+            check_ovrtx_result(result, "fetch_results");
+            
+            // Find color output (same type as detected initially)
+            OutputType frame_output_type;
+            color_output_handle = find_color_output(outputs, frame_output_type);
+            if (color_output_handle == OVRTX_INVALID_HANDLE) {
+                std::cerr << "ERROR: could not find output from " << render_product_path << std::endl;
+                ovrtx_destroy_results(renderer, step_result_handle);
+                ovrtx_destroy_renderer(renderer);
+                ovrtx_shutdown();
+                return 2;
+            }
+            
+            result = ovrtx_map_rendered_output(renderer, color_output_handle, &map_desc, ovrtx_timeout_infinite, &rendered_output);
+            check_ovrtx_result(result, "map_rendered_output");
+            
+            current_map_handle = rendered_output.map_handle;
+            has_mapped_output = true;
+            
+            CUarray cuda_array = reinterpret_cast<CUarray>(rendered_output.buffer.dl.data);
+            CUevent wait_event = reinterpret_cast<CUevent>(rendered_output.buffer.cuda_sync.wait_event);
+            int out_width = static_cast<int>(rendered_output.buffer.dl.shape[1]);
+            int out_height = static_cast<int>(rendered_output.buffer.dl.shape[0]);
+            
+            if (wait_event) {
+                cuda_wait_event(wait_event, cuda_stream);
+            }
+            cuda_copy_array_to_surface(0, cuda_array, out_width, out_height, cuda_format, cuda_stream);
+            cuEventRecord(cuda_copy_done_event, cuda_stream);
+            cuStreamSynchronize(cuda_stream);
+            
+            // Release priming output
+            ovrtx_cuda_sync_t copy_done_sync = {};
+            copy_done_sync.wait_event = reinterpret_cast<uintptr_t>(cuda_copy_done_event);
+            result = ovrtx_unmap_rendered_output(renderer, current_map_handle, copy_done_sync);
+            check_ovrtx_result(result, "unmap_rendered_output");
+            result = ovrtx_destroy_results(renderer, current_step_result);
+            check_ovrtx_result(result, "destroy_results");
+            has_mapped_output = false;
+            
+            read_idx = 0;
+            write_idx = 1;
+        }
+        
+        printf("Double-buffered async rendering initialized\n");
+        
+        // Timing accumulators
+        double accumulated_cpu_ms = 0.0;
+        double accumulated_vulkan_ms = 0.0;
+        double accumulated_cuda_ms = 0.0;
+        int frame_count = 0;
+        int cuda_frame_count = 0;
+        int swaps_this_second = 0;
+        auto last_print_time = std::chrono::steady_clock::now();
+        auto last_step_time = std::chrono::steady_clock::now();
+        
+        // Frame time storage for final statistics (only when num_frames > 0)
+        std::vector<double> all_cpu_times_ms;
+        std::vector<double> all_vulkan_times_ms;
+        std::vector<double> all_cuda_times_ms;
+        
+        if (num_frames > 0) {
+            all_cpu_times_ms.reserve(num_frames);
+            all_vulkan_times_ms.reserve(num_frames);
+            all_cuda_times_ms.reserve(num_frames);
+        }
+        
+        printf("Starting render loop (async double-buffered)...\n");
+        if (num_frames > 0) {
+            printf("Will render %d frames then save out.png and exit\n", num_frames);
+        }
+        
+        int total_frames = 0;
+        
+        // =====================================================================
+        // Main loop
+        // =====================================================================
+        while (!vk.should_close()) {
+            vk.poll_events();
+            
+            auto size = vk.framebuffer_size();
+            if (size.x == 0 || size.y == 0) {
+                glfwWaitEvents();
+                continue;
+            }
+            
+            auto frame_start = std::chrono::steady_clock::now();
+            
+            vk.wait_for_fence();
+            
+            if (frame_count > 0) {
+                double vulkan_ms = vk.vulkan_elapsed_ms();
+                accumulated_vulkan_ms += vulkan_ms;
+                if (num_frames > 0) {
+                    all_vulkan_times_ms.push_back(vulkan_ms);
+                }
+            }
+            
+            vk.reset_fence();
+            
+            uint32_t image_index;
+            auto acquire_result = vk.acquire_next_image(image_index);
+            
+            if (acquire_result == AcquireResult::OutOfDate) {
+                vk.recreate_swapchain();
+                vk.reset_fence_to_signaled();
+                continue;
+            } else if (acquire_result == AcquireResult::Minimized) {
+                vk.reset_fence_to_signaled();
+                continue;
+            }
+            
+            // Check if CUDA finished
+            if (cuda_work_pending) {
+                CUresult event_status = cuEventQuery(cuda_frame_done_event);
+                if (event_status == CUDA_SUCCESS) {
+                    float cuda_elapsed_ms = 0.0f;
+                    cuEventElapsedTime(&cuda_elapsed_ms, cuda_start_event, cuda_end_event);
+                    accumulated_cuda_ms += cuda_elapsed_ms;
+                    cuda_frame_count++;
+                    if (num_frames > 0) {
+                        all_cuda_times_ms.push_back(cuda_elapsed_ms);
+                    }
+                    
+                    std::swap(read_idx, write_idx);
+                    cuda_work_pending = false;
+                    swaps_this_second++;
+                }
+            }
+            
+            // Update camera transform if changed
+            if (g_camera_dirty) {
+                // Write transform to ovrtx
+                ovx_string_t prim_path_str = {};
+                prim_path_str.ptr = "/World/Camera";
+                prim_path_str.length = strlen("/World/Camera");
+                
+                ovrtx_prim_list_t prim_list = {};
+                prim_list.prim_paths = &prim_path_str;
+                prim_list.num_paths = 1;
+                
+                ovrtx_attribute_type_t attr_type = {};
+                attr_type.dtype.code = kDLFloat;
+                attr_type.dtype.bits = 64;
+                attr_type.dtype.lanes = 16;
+                attr_type.is_array = false;
+                attr_type.semantic = OVRTX_SEMANTIC_TRANSFORM_4x4;
+                
+                ovrtx_binding_desc_t binding = {};
+                binding.prim_list = prim_list;
+                binding.prims_list_handle = 0;
+                binding.attribute_name.token = 0;
+                binding.attribute_name.string.ptr = "omni:fabric:localMatrix";
+                binding.attribute_name.string.length = strlen("omni:fabric:localMatrix");
+                binding.attribute_type = attr_type;
+                binding.prim_mode = OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY;
+                binding.flags = OVRTX_BINDING_FLAG_NONE;
+                
+                ovrtx_binding_desc_or_handle_t binding_desc_or_handle = {};
+                binding_desc_or_handle.binding_desc = binding;
+                binding_desc_or_handle.binding_handle = 0;
+                
+                glm::mat4 transform = orbit_camera.transform_matrix();
+                double transform_data[16];
+                float const* src = glm::value_ptr(transform);
+                for (int i = 0; i < 16; ++i) {
+                    transform_data[i] = static_cast<double>(src[i]);
+                }
+                
+                DLTensor transform_dl = {};
+                transform_dl.data = transform_data;
+                transform_dl.device.device_type = kDLCPU;
+                transform_dl.device.device_id = 0;
+                transform_dl.ndim = 1;
+                int64_t shape[1] = {1};
+                transform_dl.shape = shape;
+                transform_dl.strides = nullptr;
+                transform_dl.byte_offset = 0;
+                transform_dl.dtype.code = kDLFloat;
+                transform_dl.dtype.bits = 64;
+                transform_dl.dtype.lanes = 16;
+                
+                ovrtx_input_buffer_t input_buffer = {};
+                input_buffer.tensors = &transform_dl;
+                input_buffer.tensor_count = 1;
+                input_buffer.dirty_bits = nullptr;
+                input_buffer.dirty_bits_size = 0;
+                
+                enqueue_result = ovrtx_write_attribute(renderer, &binding_desc_or_handle, &input_buffer, OVRTX_DATA_ACCESS_SYNC);
+                check_ovrtx_enqueue_result(enqueue_result, "write_attribute");
+                
+                g_camera_dirty = false;
+            }
+            
+            // Start new CUDA work if not pending
+            if (!cuda_work_pending) {
+                cuEventRecord(cuda_start_event, cuda_stream);
+                
+                // ovrtx step with actual delta time
+                auto now = std::chrono::steady_clock::now();
+                double delta_time = std::chrono::duration<double>(now - last_step_time).count();
+                last_step_time = now;
+                
+                enqueue_result = ovrtx_step(renderer, render_products, delta_time, &current_step_result);
+                check_ovrtx_enqueue_result(enqueue_result, "step");
+                
+                result = ovrtx_fetch_results(renderer, current_step_result, ovrtx_timeout_infinite, &outputs);
+                check_ovrtx_result(result, "fetch_results");
+                
+                // Find color output (same type as detected initially)
+                OutputType frame_output_type;
+                color_output_handle = find_color_output(outputs, frame_output_type);
+                
+                result = ovrtx_map_rendered_output(renderer, color_output_handle, &map_desc, ovrtx_timeout_infinite, &rendered_output);
+                check_ovrtx_result(result, "map_rendered_output");
+                
+                current_map_handle = rendered_output.map_handle;
+                has_mapped_output = true;
+                
+                CUarray cuda_array = reinterpret_cast<CUarray>(rendered_output.buffer.dl.data);
+                CUevent wait_event = reinterpret_cast<CUevent>(rendered_output.buffer.cuda_sync.wait_event);
+                int out_width = static_cast<int>(rendered_output.buffer.dl.shape[1]);
+                int out_height = static_cast<int>(rendered_output.buffer.dl.shape[0]);
+                
+                if (wait_event) {
+                    cuda_wait_event(wait_event, cuda_stream);
+                }
+                
+                cuda_copy_array_to_surface(write_idx, cuda_array, out_width, out_height, cuda_format, cuda_stream);
+                cuEventRecord(cuda_copy_done_event, cuda_stream);
+                
+                // Release ovrtx output
+                ovrtx_cuda_sync_t copy_done_sync = {};
+                copy_done_sync.wait_event = reinterpret_cast<uintptr_t>(cuda_copy_done_event);
+                result = ovrtx_unmap_rendered_output(renderer, current_map_handle, copy_done_sync);
+                check_ovrtx_result(result, "unmap_rendered_output");
+                result = ovrtx_destroy_results(renderer, current_step_result);
+                check_ovrtx_result(result, "destroy_results");
+                has_mapped_output = false;
+                
+                cuEventRecord(cuda_end_event, cuda_stream);
+                cuEventRecord(cuda_frame_done_event, cuda_stream);
+                cuda_frame_counter++;
+                cuda_signal_timeline(cuda_frame_counter, cuda_stream);
+                cuda_work_pending = true;
+            }
+            
+            // Record Vulkan frame
+            CommandBuffer cmd = vk.command_buffer();
+            cmd.begin();
+            cmd.reset_query_pool(vk.timestamp_query_pool(), 0, 2);
+            cmd.write_timestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.timestamp_query_pool(), 0);
+            
+            VkImage read_image = vk.sampled_image(shared_images[read_idx]).image;
+            cmd.image_memory_barrier(read_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                     VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
+            
+            cmd.image_memory_barrier(vk.swapchain_image(image_index), VK_IMAGE_ASPECT_COLOR_BIT,
+                                     VK_IMAGE_LAYOUT_UNDEFINED, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+            
+            VkRenderingAttachmentInfo color_attachment = {};
+            color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            color_attachment.imageView = vk.swapchain_image_view(image_index);
+            color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            color_attachment.clearValue.color = {{0.1f, 0.1f, 0.1f, 1.0f}};
+            
+            VkRenderingInfo rendering_info = {};
+            rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            rendering_info.renderArea.offset = {0, 0};
+            rendering_info.renderArea.extent = vk.swapchain_extent();
+            rendering_info.layerCount = 1;
+            rendering_info.colorAttachmentCount = 1;
+            rendering_info.pColorAttachments = &color_attachment;
+            
+            vkCmdBeginRendering(cmd.handle(), &rendering_info);
+            
+            VkExtent2D extent = vk.swapchain_extent();
+            cmd.set_viewport(0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height));
+            cmd.set_scissor(0, 0, extent.width, extent.height);
+            cmd.set_rasterizer_discard_enable(false);
+            cmd.set_polygon_mode(VK_POLYGON_MODE_FILL);
+            cmd.set_cull_mode(VK_CULL_MODE_NONE);
+            cmd.set_front_face(VK_FRONT_FACE_COUNTER_CLOCKWISE);
+            cmd.set_depth_bias_enable(false);
+            cmd.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+            cmd.set_primitive_restart_enable(false);
+            cmd.set_depth_test_enable(false);
+            cmd.set_depth_write_enable(false);
+            cmd.set_depth_bounds_test_enable(false);
+            cmd.set_stencil_test_enable(false);
+            cmd.set_rasterization_samples(VK_SAMPLE_COUNT_1_BIT);
+            cmd.set_sample_mask(VK_SAMPLE_COUNT_1_BIT, 0xFFFFFFFF);
+            cmd.set_alpha_to_coverage_enable(false);
+            cmd.set_color_blend_enable(0, false);
+            cmd.set_color_write_mask(0, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+            cmd.set_vertex_input_empty();
+            
+            vk.bind_shaders(vert_shader, frag_shader);
+            VkDescriptorSet desc_set = vk.descriptor_set();
+            cmd.bind_descriptor_sets(VK_PIPELINE_BIND_POINT_GRAPHICS, vk.pipeline_layout(), 0, 1, &desc_set);
+            
+            uint32_t tex_idx = vk.sampled_image(shared_images[read_idx]).descriptor_index;
+            cmd.push_constants(vk.pipeline_layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(tex_idx), &tex_idx);
+            
+            cmd.draw(3);
+            
+            vkCmdEndRendering(cmd.handle());
+            
+            cmd.image_memory_barrier(vk.swapchain_image(image_index), VK_IMAGE_ASPECT_COLOR_BIT,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, VK_ACCESS_2_NONE);
+            
+            cmd.image_memory_barrier(read_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                                     VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT);
+            
+            cmd.write_timestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk.timestamp_query_pool(), 1);
+            cmd.end();
+            vk.submit_and_present(image_index);
+            
+            auto frame_end = std::chrono::steady_clock::now();
+            double cpu_ms = std::chrono::duration<double, std::milli>(frame_end - frame_start).count();
+            accumulated_cpu_ms += cpu_ms;
+            if (num_frames > 0) {
+                all_cpu_times_ms.push_back(cpu_ms);
+            }
+            frame_count++;
+            total_frames++;
+            
+            if (num_frames > 0 && total_frames >= num_frames) {
+                break;
+            }
+            
+            auto now = std::chrono::steady_clock::now();
+            double elapsed_seconds = std::chrono::duration<double>(now - last_print_time).count();
+            if (elapsed_seconds >= 1.0) {
+                double avg_cpu_ms = accumulated_cpu_ms / frame_count;
+                double avg_vulkan_ms = accumulated_vulkan_ms / frame_count;
+                double avg_cuda_ms = (cuda_frame_count > 0) ? accumulated_cuda_ms / cuda_frame_count : 0.0;
+                
+                printf("Avg (ms): CPU=%.3f  Vulkan=%.3f  CUDA=%.3f  FPS=%.1f  Swaps=%d\n",
+                       avg_cpu_ms, avg_vulkan_ms, avg_cuda_ms, frame_count / elapsed_seconds, swaps_this_second);
+                
+                accumulated_cpu_ms = 0.0;
+                accumulated_vulkan_ms = 0.0;
+                accumulated_cuda_ms = 0.0;
+                frame_count = 0;
+                cuda_frame_count = 0;
+                swaps_this_second = 0;
+                last_print_time = now;
+            }
+        }
+        
+        cuStreamSynchronize(cuda_stream);
+        vk.wait_for_fence();
+        
+        // Print frame time statistics if --num-frames was specified
+        if (num_frames > 0) {
+            auto compute_stats = [](std::vector<double> const& times) -> std::tuple<double, double, double> {
+                if (times.empty()) return {0.0, 0.0, 0.0};
+                double min_val = *std::min_element(times.begin(), times.end());
+                double max_val = *std::max_element(times.begin(), times.end());
+                double sum = 0.0;
+                for (double t : times) sum += t;
+                double mean = sum / static_cast<double>(times.size());
+                return {min_val, max_val, mean};
+            };
+            
+            printf("\n=== Frame Time Statistics (%d frames) ===\n", total_frames);
+            
+            auto [cpu_min, cpu_max, cpu_mean] = compute_stats(all_cpu_times_ms);
+            printf("CPU:    min=%.3f ms  max=%.3f ms  mean=%.3f ms  (n=%zu)\n", 
+                   cpu_min, cpu_max, cpu_mean, all_cpu_times_ms.size());
+            
+            auto [vk_min, vk_max, vk_mean] = compute_stats(all_vulkan_times_ms);
+            printf("Vulkan: min=%.3f ms  max=%.3f ms  mean=%.3f ms  (n=%zu)\n", 
+                   vk_min, vk_max, vk_mean, all_vulkan_times_ms.size());
+            
+            auto [cuda_min, cuda_max, cuda_mean] = compute_stats(all_cuda_times_ms);
+            printf("CUDA:   min=%.3f ms  max=%.3f ms  mean=%.3f ms  (n=%zu)\n", 
+                   cuda_min, cuda_max, cuda_mean, all_cuda_times_ms.size());
+        }
+        
+        // Save last rendered frame to PNG if --num-frames was specified
+        if (num_frames > 0) {
+            printf("Reading back frame from buffer %d...\n", read_idx);
+            std::vector<uint8_t> pixels = cuda_read_surface_rgba8(
+                read_idx, tex_width, tex_height, 
+                (output_type == OutputType::HdrColor) ? CudaImageFormat::Half4 : CudaImageFormat::UInt8_4);
+            
+            int ok = stbi_write_png("out.png", tex_width, tex_height, 4, pixels.data(), tex_width * 4);
+            if (ok) {
+                printf("Saved out.png (%dx%d)\n", tex_width, tex_height);
+            } else {
+                fprintf(stderr, "Failed to write out.png\n");
+            }
+        }
+        
+        cuEventDestroy(cuda_start_event);
+        cuEventDestroy(cuda_end_event);
+        cuEventDestroy(cuda_frame_done_event);
+        cuEventDestroy(cuda_copy_done_event);
+        cuStreamDestroy(cuda_stream);
+        cuda_cleanup();
+    }
+    
+    g_orbit_camera = nullptr;
+    
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    
+    // Cleanup ovrtx
+    ovrtx_destroy_renderer(renderer);
+    ovrtx_shutdown();
+    
+    printf("Done!\n");
+    return 0;
+}
