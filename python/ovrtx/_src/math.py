@@ -36,11 +36,12 @@ class Matrix4d(ctypes.Structure):
         m[0][0] = 99.0
 
         # Use with write_attribute
-        renderer.write_attribute_sync(
+        from ovrtx import Semantic
+        renderer.write_attribute(
             prim_paths=["/World/Cube"],
-            attribute_name="omni:fabric:worldMatrix",
-            data=m,
-            semantic="transform_4x4"
+            attribute_name="omni:xform",
+            tensor=m.to_dltensor(),
+            semantic=Semantic.XFORM_MAT4x4,
         )
         ```
     """

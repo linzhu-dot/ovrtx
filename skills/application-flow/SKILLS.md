@@ -33,107 +33,29 @@ Every ovrtx application follows the same core lifecycle, whether in Python or C.
 
 ## Python
 
-```python
-import ovrtx
-import numpy as np
-from PIL import Image
-
-# 1. Create renderer (see renderer-creation skill)
-renderer = ovrtx.Renderer()
-
-# 2. Load USD (see loading-usd skill)
-renderer.add_usd("scene.usda")
-
-# 3. (Optional) Clone prims for instancing (see cloning-prims skill)
-renderer.clone_usd("/World/Template", [f"/World/Copy_{i}" for i in range(10)])
-
-# 4. Render loop
-for frame_idx in range(100):
-    # 4a. Write attributes (see writing-transforms, writing-attributes skills)
-    #     For repeated writes, use attribute bindings (see attribute-bindings skill)
-    #     For zero-copy GPU writes, use mapping (see mapping-attributes skill)
-
-    # 4b. Step (see stepping-and-rendering skill)
-    products = renderer.step(
-        render_products={"/Render/Camera"},
-        delta_time=1.0 / 60,
-    )
-
-    # 4c. Read output (see reading-render-output skill)
-    for product_name, product in products.items():
-        for frame in product.frames:
-            with frame.render_vars["LdrColor"].map(device="cpu") as var:
-                pixels = var.tensor.numpy()
-                Image.fromarray(pixels).save(f"frame_{frame_idx:04d}.png")
-
-# 5. Cleanup -- Python garbage collection handles renderer teardown,
-#    but explicit cleanup is recommended for bindings, etc.
-```
+> **Source:** `examples/python/minimal/main.py` snippet `create-renderer`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `add-usd`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `step`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `read-render-output`
+>
+> For the full lifecycle with attribute writes, bindings, and cloning, compose the relevant skill snippets.
 
 ## C
 
-```c
-#include <ovrtx/ovrtx.h>
-#include <ovrtx/ovrtx_config.h>
-#include <ovrtx/ovrtx_types.h>
-
-#include <cstring>
-
-// 1. Create renderer (see renderer-creation skill)
-ovrtx_renderer_t* renderer = nullptr;
-ovrtx_config_t config = {};
-ovrtx_result_t result = ovrtx_create_renderer(&config, &renderer);
-
-// 2. Load USD (see loading-usd skill)
-ovrtx_usd_handle_t usd_handle = 0;
-ovrtx_usd_input_t usd_input = {};
-usd_input.usd_file_path = {"scene.usda", strlen("scene.usda")};
-
-ovrtx_enqueue_result_t enqueue_result =
-    ovrtx_add_usd(renderer, usd_input, {"", 0}, &usd_handle);
-
-// Wait for load (async in C -- see loading-usd skill)
-ovrtx_op_wait_result_t wait_result;
-while (ovrtx_wait_op(renderer, enqueue_result.op_index, ovrtx_timeout_t{0},
-                     &wait_result).status == OVRTX_API_TIMEOUT) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-
-// 3. (Optional) Clone prims (see cloning-prims skill)
-//    Must wait on the clone op before using the new prims.
-
-// 4. Render loop
-ovx_string_t rp_path = {"/Render/Camera", strlen("/Render/Camera")};
-ovrtx_render_product_set_t render_products = {};
-render_products.render_products = &rp_path;
-render_products.num_render_products = 1;
-
-for (int frame = 0; frame < 100; ++frame) {
-    // 4a. Write attributes (see writing-transforms, writing-attributes skills)
-    //     For repeated writes, use attribute bindings (see attribute-bindings skill)
-    //     For zero-copy writes, use mapping (see mapping-attributes skill)
-
-    // 4b. Step (see stepping-and-rendering skill)
-    ovrtx_step_result_handle_t step_handle = 0;
-    enqueue_result =
-        ovrtx_step(renderer, render_products, 1.0 / 60.0, &step_handle);
-    ovrtx_wait_op(renderer, enqueue_result.op_index,
-                  ovrtx_timeout_infinite, &wait_result);
-
-    // 4c. Fetch + read output (see reading-render-output skill)
-    ovrtx_render_product_set_outputs_t outputs = {};
-    ovrtx_fetch_results(renderer, step_handle,
-                        ovrtx_timeout_infinite, &outputs);
-
-    // ... map output, read pixels, unmap ...
-
-    // Free step results each iteration
-    ovrtx_destroy_results(renderer, step_handle);
-}
-
-// 5. Cleanup
-ovrtx_destroy_renderer(renderer);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `create-renderer`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `step-renderer`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `fetch-results`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `map-rendered-output-cpu`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `unmap-and-cleanup`
 
 ## Key Differences: Python vs C
 

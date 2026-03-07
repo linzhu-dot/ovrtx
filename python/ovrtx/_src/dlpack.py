@@ -12,8 +12,9 @@ This module provides ctypes wrappers for DLPack tensors, enabling efficient
 data sharing between the C library and Python without copying.
 
 Supports:
-- DLPack 0.8: DLTensor, DLManagedTensor (matches dlpack.h)
-- DLPack 1.0: DLManagedTensorVersioned with flags for read-only/writeable control
+- DLPack 0.8: DLTensor, DLManagedTensor (legacy capsule layout).
+- DLPack 1.0: DLManagedTensorVersioned with flags for read-only/writeable control.
+- DLPack 1.3: device/type enums aligned with ovrtx dlpack.h.
 
 NumPy 2.1+ supports the versioned protocol and respects DLPACK_FLAG_BITMASK_READ_ONLY.
 Older NumPy versions default to read-only for safety.
@@ -32,19 +33,16 @@ __all__ = [
     "DLPackVersion",
     "DLManagedTensorVersioned",
     "ManagedDLTensor",
-    "DLPACK_VERSION",
     "DLPACK_MAJOR_VERSION",
     "DLPACK_MINOR_VERSION",
     "DLPACK_FLAG_BITMASK_READ_ONLY",
     "DLPACK_FLAG_BITMASK_IS_COPIED",
+    "DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED",
 ]
 
-# DLPack version 0.8 (C library compatibility)
-DLPACK_VERSION = 0x080
-
-# DLPack 1.0 version numbers (for versioned capsules)
+# DLPack version numbers (aligned with C header dlpack.h)
 DLPACK_MAJOR_VERSION = 1
-DLPACK_MINOR_VERSION = 0
+DLPACK_MINOR_VERSION = 3
 
 # Capsule name strings
 _c_str_dltensor = b"dltensor"
@@ -52,9 +50,10 @@ _c_str_used_dltensor = b"used_dltensor"
 _c_str_dltensor_versioned = b"dltensor_versioned"
 _c_str_used_dltensor_versioned = b"used_dltensor_versioned"
 
-# DLPack 1.0 flag bitmasks
+# DLPack 1.0+ flag bitmasks
 DLPACK_FLAG_BITMASK_READ_ONLY = 1 << 0
 DLPACK_FLAG_BITMASK_IS_COPIED = 1 << 1
+DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED = 1 << 2
 
 
 class DLDeviceType(ctypes.c_int):
@@ -68,13 +67,16 @@ class DLDeviceType(ctypes.c_int):
     kDLOpenCL = 4
     kDLVulkan = 7
     kDLMetal = 8
-    kDLHexagon = 9
+    kDLVPI = 9
     kDLROCM = 10
     kDLROCMHost = 11
     kDLExtDev = 12
     kDLCUDAManaged = 13
     kDLOneAPI = 14
     kDLWebGPU = 15
+    kDLHexagon = 16
+    kDLMAIA = 17
+    kDLTrn = 18
 
     def __str__(self):
         return {
@@ -84,13 +86,16 @@ class DLDeviceType(ctypes.c_int):
             self.kDLOpenCL: "OpenCL",
             self.kDLVulkan: "Vulkan",
             self.kDLMetal: "Metal",
-            self.kDLHexagon: "Hexagon",
+            self.kDLVPI: "VPI",
             self.kDLROCM: "ROCM",
             self.kDLROCMHost: "ROCMHost",
             self.kDLExtDev: "ExtDev",
             self.kDLCUDAManaged: "CUDAManaged",
             self.kDLOneAPI: "OneAPI",
             self.kDLWebGPU: "WebGPU",
+            self.kDLHexagon: "Hexagon",
+            self.kDLMAIA: "MAIA",
+            self.kDLTrn: "Trn",
         }.get(self.value, f"Device{self.value}")
 
 
@@ -103,6 +108,18 @@ class DLDataTypeCode(ctypes.c_uint8):
     kDLOpaqueHandle = 3
     kDLBfloat = 4
     kDLComplex = 5
+    kDLBool = 6
+    kDLFloat8_e3m4 = 7
+    kDLFloat8_e4m3 = 8
+    kDLFloat8_e4m3b11fnuz = 9
+    kDLFloat8_e4m3fn = 10
+    kDLFloat8_e4m3fnuz = 11
+    kDLFloat8_e5m2 = 12
+    kDLFloat8_e5m2fnuz = 13
+    kDLFloat8_e8m0fnu = 14
+    kDLFloat6_e2m3fn = 15
+    kDLFloat6_e3m2fn = 16
+    kDLFloat4_e2m1fn = 17
 
     def __str__(self):
         return {
@@ -112,6 +129,18 @@ class DLDataTypeCode(ctypes.c_uint8):
             self.kDLBfloat: "bfloat",
             self.kDLComplex: "complex",
             self.kDLOpaqueHandle: "void_p",
+            self.kDLBool: "bool",
+            self.kDLFloat8_e3m4: "float8_e3m4",
+            self.kDLFloat8_e4m3: "float8_e4m3",
+            self.kDLFloat8_e4m3b11fnuz: "float8_e4m3b11fnuz",
+            self.kDLFloat8_e4m3fn: "float8_e4m3fn",
+            self.kDLFloat8_e4m3fnuz: "float8_e4m3fnuz",
+            self.kDLFloat8_e5m2: "float8_e5m2",
+            self.kDLFloat8_e5m2fnuz: "float8_e5m2fnuz",
+            self.kDLFloat8_e8m0fnu: "float8_e8m0fnu",
+            self.kDLFloat6_e2m3fn: "float6_e2m3fn",
+            self.kDLFloat6_e3m2fn: "float6_e3m2fn",
+            self.kDLFloat4_e2m1fn: "float4_e2m1fn",
         }.get(self.value, f"type{self.value}")
 
 
@@ -205,10 +234,6 @@ class DLTensor(ctypes.Structure):
         ("byte_offset", ctypes.c_uint64),
     ]
 
-    # Storage for source objects and deep-copied shape/strides arrays, keyed by data pointer.
-    # Ensures data pointer validity and shape/strides lifetime across ctypes structure copies.
-    _array_storage: dict = {}
-
     @classmethod
     def from_dlpack(cls, obj: Any) -> "DLTensor":
         """Extract DLTensor from an object implementing the DLPack protocol.
@@ -254,32 +279,34 @@ class DLTensor(ctypes.Structure):
         result.dtype = src.dtype
         result.byte_offset = src.byte_offset
 
-        # Deep-copy shape and strides arrays to module-level storage.
-        # Also keep source object alive so data pointer remains valid.
-        storage = {"source_obj": obj}
+        # Deep-copy shape/strides arrays and keep source object alive as instance
+        # attributes so their lifetime is tied to this DLTensor.
+        result._source_obj = obj
         if src.ndim > 0 and src.shape:
-            shape_array = (ctypes.c_int64 * src.ndim)()
+            result._shape_storage = (ctypes.c_int64 * src.ndim)()
             for i in range(src.ndim):
-                shape_array[i] = src.shape[i]
-            storage["shape"] = shape_array
-            result.shape = ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64))
+                result._shape_storage[i] = src.shape[i]
+            result.shape = ctypes.cast(result._shape_storage, ctypes.POINTER(ctypes.c_int64))
         else:
             result.shape = None
 
         if src.ndim > 0 and src.strides:
-            strides_array = (ctypes.c_int64 * src.ndim)()
+            result._strides_storage = (ctypes.c_int64 * src.ndim)()
             for i in range(src.ndim):
-                strides_array[i] = src.strides[i]
-            storage["strides"] = strides_array
-            result.strides = ctypes.cast(strides_array, ctypes.POINTER(ctypes.c_int64))
+                result._strides_storage[i] = src.strides[i]
+            result.strides = ctypes.cast(result._strides_storage, ctypes.POINTER(ctypes.c_int64))
         else:
             result.strides = None
 
-        # Store in class-level dict keyed by data pointer (survives structure copying)
-        cls._array_storage[result.data] = storage
-
         # Mark capsule as consumed per DLPack protocol (prevents double-consumption)
         PyCapsule_SetName(capsule, b"used_dltensor")
+
+        # Release the managed tensor descriptor. We've deep-copied shape/strides and
+        # keep the source object alive via _source_obj, so the descriptor is no longer
+        # needed. The deleter frees the DLManagedTensor struct and Py_DecRefs the
+        # producer's internal hold on the source object (our _source_obj ref keeps it alive).
+        if managed.deleter:
+            managed.deleter(ptr)
 
         return result
 
@@ -593,8 +620,12 @@ class ManagedDLTensor:
         if copy is True:
             raise BufferError("copy=True not supported")
 
-        # Check if consumer supports versioned protocol
-        use_versioned = max_version is not None and max_version >= (DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION)
+        # Return versioned capsule when consumer supports same major and at least (1, 0). DLPack
+        # minor version changes are ABI-compatible (same DLManagedTensorVersioned layout); only
+        # major version changes the layout. Same major ensures the consumer can use our struct;
+        # (1, 0) minimum ensures they support the versioned protocol. NumPy 2.1+ requests
+        # max_version=(1, 0) and then respects the read-only flag; legacy capsules are read-only.
+        use_versioned = max_version is not None and max_version[0] == DLPACK_MAJOR_VERSION and max_version >= (1, 0)
 
         return _to_dlpack_capsule(
             self._dl_tensor,

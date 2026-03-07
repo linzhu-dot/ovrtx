@@ -14,7 +14,7 @@ ovrtx outputs are mapped to CUDA arrays every frame, which are then copied to CU
 - [Vulkan SDK 1.3.250+](https://vulkan.lunarg.com/sdk/home)
 - [CUDA Toolkit 12.0+](https://developer.nvidia.com/cuda-downloads)
 
-Other dependencies (ovrtx, GLM, volk, unordered_dense, glfw3) are downloaded automatically at configure time via CMake FetchContent.
+If ovrtx or glfw3 are already installed and available via `CMAKE_PREFIX_PATH`, the local installations are used. Otherwise they are downloaded automatically at configure time. Other dependencies (GLM, volk, unordered_dense) are always downloaded via FetchContent.
 
 ### Building
 
@@ -37,7 +37,7 @@ cmake --build build
 - [Vulkan SDK 1.3.250+](https://vulkan.lunarg.com/sdk/home)
 - [CUDA Toolkit 12.0+](https://developer.nvidia.com/cuda-downloads)
 
-Other dependencies (ovrtx, GLM, volk, unordered_dense, glfw3) are downloaded automatically at configure time via CMake FetchContent.
+If ovrtx or glfw3 are already installed and available via `CMAKE_PREFIX_PATH`, the local installations are used. Otherwise they are downloaded automatically at configure time. Other dependencies (GLM, volk, unordered_dense) are always downloaded via FetchContent.
 
 ### Building
 

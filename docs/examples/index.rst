@@ -13,64 +13,54 @@ Examples
 
 This section contains example projects demonstrating various features of ovrtx.
 
-C Examples
-----------
-
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
-
-   * - .. image:: ../../img/example-minimal.jpg
-          :alt: Minimal Example
-          :target: c_minimal.html
-
-       **Minimal**
-
-       Basic renderer initialization, rendering a single frame from an RGB camera and writing the result to disk as a PNG.
-
-       :doc:`Build & run instructions → <c_minimal>`
-
-     - .. image:: ../../img/example-vulkan-interop.gif
-          :alt: Vulkan Interop Example
-          :target: c_vulkan_interop.html
-
-       **Vulkan Interop**
-
-       Demonstrates ovrtx-Vulkan interoperability, rendering USD scenes and displaying them in a Vulkan window with interactive orbit camera control.
-
-       :doc:`Build & run instructions → <c_vulkan_interop>`
-
 Python Examples
 ---------------
 
-.. list-table::
-   :widths: 50 50
-   :header-rows: 0
+.. grid:: 2
+   :gutter: 2
 
-   * - .. image:: ../../img/example-minimal.jpg
-          :alt: Minimal Example
-          :target: python_minimal.html
+   .. grid-item-card:: Minimal
+      :img-top: ../../img/example-minimal.jpg
+      :img-alt: Minimal example output
 
-       **Minimal**
+      Basic workflow: create a Renderer, load a USD layer, step the renderer, and map/display the rendered output.
+      +++
+      :doc:`Build & run instructions → <python_minimal>`
 
-       Basic workflow: create a Renderer, load a USD layer, step the renderer, and map/display the rendered output.
+   .. grid-item-card:: Planet System
+      :img-top: ../../img/example-planet-system.jpg
+      :img-alt: Planet System example output
 
-       :doc:`Build & run instructions → <python_minimal>`
+      Animated planetary system using Warp kernels for GPU-accelerated animation, demonstrating dynamic scene modification and zero-copy transform updates.
+      +++
+      :doc:`Build & run instructions → <python_planet_system>`
 
-     - .. image:: ../../img/example-planet-system.jpg
-          :alt: Planet System Example
-          :target: python_planet_system.html
+C Examples
+----------
 
-       **Planet System**
+.. grid:: 2
+   :gutter: 2
 
-       Animated planetary system using Warp kernels for GPU-accelerated animation, demonstrating dynamic scene modification and zero-copy transform updates.
+   .. grid-item-card:: Minimal
+      :img-top: ../../img/example-minimal.jpg
+      :img-alt: Minimal example output
 
-       :doc:`Build & run instructions → <python_planet_system>`
+      Basic renderer initialization, rendering a single frame from an RGB camera and writing the result to disk as a PNG.
+      +++
+      :doc:`Build & run instructions → <c_minimal>`
+
+   .. grid-item-card:: Vulkan Interop
+      :img-top: ../../img/example-vulkan-interop.gif
+      :img-alt: Vulkan Interop example output
+
+      Demonstrates ovrtx-Vulkan interoperability, rendering USD scenes and displaying them in a Vulkan window with interactive orbit camera control.
+      +++
+      :doc:`Build & run instructions → <c_vulkan_interop>`
 
 .. toctree::
    :hidden:
 
-   c_minimal
-   c_vulkan_interop
    python_minimal
    python_planet_system
+   c_minimal
+   c_vulkan_interop

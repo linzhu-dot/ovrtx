@@ -1,234 +1,203 @@
 # AGENTS.md - AI Agent Guidelines for ovrtx-interop
 
-> **IMPORTANT**: AI agents must update this file after making significant changes to the project structure, architecture, or conventions. This ensures future agents have accurate context.
+> IMPORTANT: Update this file after significant changes to behavior, file layout, or conventions.
 
-## Project Overview
+## Project Purpose
 
-This is a CUDA-Vulkan interop application demonstrating:
-- Sharing GPU memory between CUDA and Vulkan
-- Using ovrtx library for USD scene rendering via CUDA
-- Rendering ovrtx output as a Vulkan texture
-- **Double-buffered async rendering** with timeline semaphores
-- Interactive orbit camera control with mouse drag
-- Build-time GLSL shader compilation to SPIR-V via glslc
-- Bindless texture access using descriptor indexing
+`vulkan-interop` demonstrates how to display OVRTX-rendered frames in Vulkan by:
 
-## Architecture
+- Rendering a USD scene through OVRTX
+- Mapping OVRTX output as CUDA arrays
+- Copying into Vulkan-exported images imported by CUDA
+- Synchronizing CUDA and Vulkan with an external timeline semaphore
+- Presenting with async double-buffering (ping-pong images)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Initialization                        │
-├─────────────────────────────────────────────────────────────┤
-│  1. ovrtx init → load USD scene (creates CUDA context)      │
-│  2. CUDA Driver API init → get device UUID from ovrtx ctx   │
-│  3. Load precompiled SPIR-V shaders from build/shaders/     │
-│  4. Vulkan init → match physical device by UUID             │
-│  5. Create 2 exportable Vulkan images (double-buffer)       │
-│  6. Create timeline semaphore for CUDA-Vulkan sync          │
-│  7. Export memory FDs → import into CUDA as surfaces        │
-│  8. Create OrbitCamera for interactive control              │
-└─────────────────────────────────────────────────────────────┘
+This sample intentionally keeps OVRTX integration in `src/main.cpp` (no wrapper class).
 
-┌─────────────────────────────────────────────────────────────┐
-│                  Async Render Loop (Ping-Pong)              │
-├─────────────────────────────────────────────────────────────┤
-│  1. Poll mouse input → update OrbitCamera                   │
-│  2. Check if CUDA finished previous frame (cuEventQuery)    │
-│  3. If done → swap read_idx/write_idx buffers               │
-│  4. Start CUDA: ovrtx_step() → copy to image[write_idx]     │
-│  5. Signal timeline semaphore after CUDA copy               │
-│  6. Vulkan reads from image[read_idx] (no wait!)            │
-│  7. Vulkan renders fullscreen quad → present                │
-│  (CUDA and Vulkan run in parallel)                          │
-└─────────────────────────────────────────────────────────────┘
-```
+## Current Platform Support
 
-## Double-Buffering with Timeline Semaphores
+- Linux and Windows are both implemented.
+- Platform-specific interop handle types are selected in `src/cuda/cuda_kernel.*` and `src/vk/vulkan_context.*`.
 
-The render loop uses async double-buffering to prevent CPU stalls:
-
-- **Two shared images**: CUDA writes to one while Vulkan reads the other
-- **Timeline semaphore**: CUDA signals after each frame; CPU polls to detect completion
-- **No blocking syncs**: `cuStreamSynchronize` is not called in the hot path
-- **Ping-pong swap**: When CUDA finishes, buffers swap so Vulkan gets fresh data
-
-```
-Frame N:   CUDA writes image[0], signals timeline=1
-           Vulkan reads image[1] (previous data)
-           
-Frame N+1: CPU polls timeline, sees >=1 → swap indices
-           CUDA writes image[1], signals timeline=2
-           Vulkan reads image[0] (freshly written)
-```
-
-## File Structure
+## Source Layout (Current)
 
 ```
 ovrtx-interop/
-├── CMakeLists.txt           # Build config, FetchContent for dependencies
-├── justfile                 # Just command runner tasks
-├── AGENTS.md                # This file - AI agent guidelines
-├── README.md                # User-facing documentation
-├── src/
-│   ├── main.cpp             # Application entry, CLI, render loop, ovrtx integration
-│   ├── vk/
-│   │   ├── vulkan_context.cpp/hpp  # VulkanContext class
-│   │   ├── sampled_image.cpp/hpp   # SampledImage resource management
-│   │   ├── shader.cpp/hpp          # Shader object management
-│   │   └── command_buffer.cpp/hpp  # CommandBuffer wrapper
-│   ├── cuda/
-│   │   └── cuda_kernel.cpp/hpp     # CUDA Driver API + memory copy
-│   ├── glsl/
-│   │   └── spirv_loader.hpp        # Load precompiled SPIR-V files
-│   └── camera/
-│       └── orbit_camera.cpp/hpp    # OrbitCamera for mouse control
-├── ovrtx/                   # ovrtx library (bin/, include/, lib/)
+├── CMakeLists.txt
+├── README.md
+├── AGENTS.md
 ├── shaders/
-│   ├── fullscreen.vert      # Vertex shader (GLSL)
-│   └── fullscreen.frag      # Fragment shader (GLSL, bindless textures)
-├── torus-plane.usda         # Example USD scene for testing
-└── tests/
-    ├── validation_tracker.cpp/hpp  # Vulkan validation layer tracking
-    ├── test_context.cpp     # VulkanContext creation tests
-    ├── test_descriptors.cpp # Descriptor indexing tests
-    ├── test_rendering.cpp   # Rendering and swapchain tests
-    ├── test_cuda_kernel.cpp # CUDA kernel tests
-    └── test_cuda_interop.cpp # CUDA-Vulkan interop tests
+│   ├── fullscreen.vert
+│   └── fullscreen.frag
+├── src/
+│   ├── main.cpp
+│   ├── camera/
+│   │   ├── orbit_camera.hpp
+│   │   └── orbit_camera.cpp
+│   ├── cuda/
+│   │   ├── cuda_kernel.hpp
+│   │   └── cuda_kernel.cpp
+│   ├── glsl/
+│   │   └── spirv_loader.hpp
+│   └── vk/
+│       ├── vulkan_context.hpp
+│       ├── vulkan_context.cpp
+│       ├── sampled_image.hpp
+│       ├── sampled_image.cpp
+│       ├── shader.hpp
+│       ├── shader.cpp
+│       ├── command_buffer.hpp
+│       └── command_buffer.cpp
+└── tests/ (optional; built only with ENABLE_TESTS=ON)
 ```
 
-## Coding Conventions
+## Build and Run
 
-- **Naming**: snake_case for variables and functions, PascalCase for types
-- **Language**: C++17 for all code (no .cu files, uses Driver API)
-- **Error handling**: VK_CHECK() macro for Vulkan, CU_CHECK() macros for CUDA Driver API
-- **Globals**: Prefixed with `g_` (e.g., `g_cuda_external_memory`)
-- **Constants**: UPPER_SNAKE_CASE (e.g., `TEX_WIDTH`, `WINDOW_HEIGHT`)
-- **East const**: Use `int const*` not `const int*`
-- **Auto usage**: Only use `auto` for trailing return type syntax (`auto foo() -> ReturnType`) and structured bindings (`auto [a, b] = ...`), never for other variable declarations
+### Configure + build
 
-## CUDA Driver API
-
-This project uses the CUDA Driver API (not Runtime API):
-- `cuInit`, `cuDeviceGet`, `cuCtxCreate` for initialization
-- `cuImportExternalMemory` for Vulkan memory import
-- `cuSurfObjectCreate` for surface objects
-- `cuLaunchKernel` for kernel execution
-
-## NVRTC Runtime Compilation
-
-The CUDA kernel is compiled at runtime:
-- Kernel source stored as string constant in `cuda_kernel.cpp`
-- `nvrtcCreateProgram` and `nvrtcCompileProgram` generate PTX
-- `cuModuleLoadData` loads PTX into driver
-- `cuModuleGetFunction` retrieves kernel function pointer
-
-## Shader Compilation
-
-GLSL shaders are compiled to SPIR-V at build time:
-- CMake uses `glslc` from the Vulkan SDK
-- Source shaders in `shaders/` directory
-- Compiled `.spv` files output to `build/shaders/` and copied next to the executable
-- `spirv_loader.hpp` provides `load_spirv()` function to read compiled shaders
-- `get_executable_dir()` resolves shader path relative to the binary (works on Linux and Windows)
-
-## Vulkan 1.3 Requirements
-
-This project requires Vulkan 1.3 for dynamic rendering:
-- Uses `VK_API_VERSION_1_3`
-- Enables `VkPhysicalDeviceDynamicRenderingFeatures`
-- No VkRenderPass or VkFramebuffer objects
-- Uses `vkCmdBeginRendering()` / `vkCmdEndRendering()`
-
-## VK_EXT_shader_object
-
-This project uses shader objects instead of pipelines:
-- Enables `VkPhysicalDeviceShaderObjectFeaturesEXT`
-- Uses `VkShaderEXT` instead of `VkPipeline`
-- Shaders created with `vkCreateShadersEXT` from SPIR-V
-- Shaders bound with `vkCmdBindShadersEXT`
-- All state is dynamic (viewport, scissor, rasterization, blend, etc.)
-- Extension functions loaded via `vkGetDeviceProcAddr`
-
-Dynamic state commands used:
-- `vkCmdSetViewportWithCount`, `vkCmdSetScissorWithCount`
-- `vkCmdSetRasterizerDiscardEnable`, `vkCmdSetPolygonModeEXT`
-- `vkCmdSetCullMode`, `vkCmdSetFrontFace`, `vkCmdSetDepthBiasEnable`
-- `vkCmdSetPrimitiveTopology`, `vkCmdSetPrimitiveRestartEnable`
-- `vkCmdSetDepthTestEnable`, `vkCmdSetDepthWriteEnable`
-- `vkCmdSetRasterizationSamplesEXT`, `vkCmdSetSampleMaskEXT`
-- `vkCmdSetColorBlendEnableEXT`, `vkCmdSetColorWriteMaskEXT`
-- `vkCmdSetVertexInputEXT`
-
-## Key Vulkan Extensions
-
-Instance extensions:
-- VK_KHR_external_memory_capabilities
-- VK_KHR_external_semaphore_capabilities
-- VK_KHR_get_physical_device_properties_2
-
-Device extensions:
-- VK_KHR_swapchain
-- VK_KHR_external_memory
-- VK_KHR_external_memory_fd
-- VK_KHR_external_semaphore
-- VK_KHR_external_semaphore_fd
-- VK_EXT_shader_object
-
-## CUDA Interop Types (Driver API)
-
-- `CUexternalMemory` - Handle to imported Vulkan memory (array of 2 for double-buffer)
-- `CUmipmappedArray` - Mapped from external memory (array of 2)
-- `CUsurfObject` - Used for kernel writes via surf2Dwrite()
-- `CUexternalSemaphore` - Timeline semaphore for async CUDA-Vulkan sync
-- `CUevent` - Used to poll CUDA frame completion without blocking
-
-## Build Commands
+Linux:
 
 ```bash
-# Using just (recommended)
-just configure   # cmake -B build -G Ninja -S .
-just build       # cmake --build build
-just test        # ctest --test-dir build --output-on-failure
-
-# Manual cmake commands
-cmake -B build -G Ninja
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-
-# Run application
-./build/ovrtx-interop <usd_file_path> <render_product_path>
-
-# Example with included scene
-./build/ovrtx-interop torus-plane.usda /Render/Camera
-
-# Run tests
-ctest --test-dir build --output-on-failure
 ```
 
-Note: First build will download GoogleTest, GLM, volk, and unordered_dense via FetchContent.
+Windows:
+
+```pwsh
+cmake -B build
+cmake --build build --config Release
+```
+
+### Run
+
+Linux:
+
+```bash
+./build/ovrtx-interop
+```
+
+Windows:
+
+```pwsh
+.\build\Release\ovrtx-interop.exe
+```
+
+## Command Line Interface (Matches `main.cpp`)
+
+```text
+Usage: ovrtx-interop [options]
+
+Options:
+  --usd, -u <path>              USD file path or URL
+                                default: robot-ovrtx sample URL
+  --render-product, -r <path>   Render product prim path
+                                default: /Render/Camera
+  --up-axis, -a <Y|Z>           Scene up axis (default: Z)
+  --units <meters|centimeters>  Scene units (default: meters)
+  --num-frames, -n <N>          Render N frames, save out.png, and exit
+  --help, -h                    Show help
+```
+
+## Runtime Flow (Current Implementation)
+
+Initialization:
+
+1. `ovrtx_initialize` -> `ovrtx_create_renderer`
+2. Load USD with `ovrtx_add_usd` and wait via `ovrtx_wait_op`
+3. Call `cuda_init(&cuda_uuid)` to use the CUDA context/device selected by OVRTX
+4. Run one OVRTX step to detect output type and dimensions
+5. Create Vulkan context using CUDA UUID for device matching
+6. Create two exportable sampled images (`SHARED_IMAGE_COUNT = 2`)
+7. Export Vulkan image memory and import into CUDA as surface-backed arrays
+8. Export Vulkan timeline semaphore and import into CUDA
+9. Prime first frame into buffer 0
+
+Main loop:
+
+1. Poll window/events and acquire swapchain image
+2. If prior CUDA work is done (`cuEventQuery(cuda_frame_done_event)`):
+   - update `read_timeline_value`
+   - swap `read_idx` and `write_idx`
+3. If camera moved, write transform to OVRTX with `ovrtx_write_attribute`
+4. If no CUDA work pending:
+   - `ovrtx_step` -> `ovrtx_fetch_results` -> `ovrtx_map_rendered_output`
+   - wait on `rendered_output.buffer.cuda_sync.wait_event` (if provided)
+   - copy OVRTX `CUarray` -> CUDA-imported Vulkan image at `write_idx`
+   - signal external timeline semaphore from CUDA
+   - unmap with `ovrtx_unmap_rendered_output` using `copy_done_event`
+   - destroy results via `ovrtx_destroy_results`
+5. Vulkan draws fullscreen triangle sampling image `read_idx`
+6. Submit/present with Vulkan waiting on `read_timeline_value`
+
+## OVRTX Integration Contract
+
+The core OVRTX frame lifecycle used by this sample:
+
+1. `ovrtx_step(...)` enqueues a frame
+2. `ovrtx_fetch_results(...)` waits for completion
+3. `ovrtx_map_rendered_output(...)` maps output as CUDA array (`OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`)
+4. Consume `rendered_output.buffer.dl.data` as `CUarray`
+5. If `rendered_output.buffer.cuda_sync.wait_event != 0`, wait on it in CUDA stream
+6. After copy/compute, call `ovrtx_unmap_rendered_output(...)` and pass completion event
+7. Call `ovrtx_destroy_results(...)`
+
+Do not skip unmap/destroy; the sample treats these as required per-frame cleanup.
+
+## Output Type and Format Mapping
+
+Output detection:
+
+- Search render vars for `HdrColor` first, then `LdrColor`.
+- `HdrColor` is preferred when both exist.
+
+Format mapping used in this sample:
+
+| OVRTX output | Vulkan format | CUDA image format | bytes/pixel |
+|---|---|---|---|
+| HdrColor | `VK_FORMAT_R16G16B16A16_SFLOAT` | `CudaImageFormat::Half4` | 8 |
+| LdrColor | `VK_FORMAT_R8G8B8A8_SRGB` | `CudaImageFormat::UInt8_4` | 4 |
+
+## Synchronization Model
+
+- OVRTX -> CUDA: per-frame CUDA wait event from mapped output (`cuda_sync.wait_event`)
+- CUDA -> Vulkan: external timeline semaphore; CUDA signals monotonically increasing value
+- CPU side: frame completion is polled by `cuEventQuery(cuda_frame_done_event)` to avoid blocking
+- Double buffering:
+  - CUDA writes `write_idx`
+  - Vulkan samples `read_idx`
+  - indices swap only after CUDA frame is complete
+
+## Camera and Scene Updates
+
+- Orbit camera input is handled through GLFW callbacks.
+- On change, camera transform is written to `/World/Camera` attribute `omni:fabric:localMatrix`.
+- `OVRTX_SEMANTIC_TRANSFORM_4x4` is used with a 16-lane float64 DLTensor payload.
 
 ## Dependencies
 
-**System packages** (must be in CMAKE_PREFIX_PATH):
-- Vulkan SDK 1.4+ (provides glslc compiler)
-- CUDA Toolkit
-- glfw3
-- ovrtx library
+System requirements (found via CMake):
 
-**FetchContent downloads** (automatic):
-- GoogleTest v1.14.0
-- GLM v1.0.3
-- volk v1.4.304
-- unordered_dense v4.4.0
+- CUDA Toolkit (`find_package(CUDAToolkit REQUIRED)`)
+- Vulkan SDK/runtime (`find_package(Vulkan REQUIRED)` + `glslc`)
 
-## Command Line Interface
+Fetched automatically by CMake:
 
-```
-Usage: ovrtx-interop [options] <usd_file_path> <render_product_path>
+- OVRTX via `ovrtx_fetch()`
+- GLFW (if not found locally)
+- GLM
+- volk
+- unordered_dense
+- GoogleTest (only when `ENABLE_TESTS=ON`)
 
-Arguments:
-  usd_file_path       Path to the USD scene file
-  render_product_path USD path to the render product (camera/sensor)
+## Notes for Future Agents
 
+- Prefer keeping OVRTX interop behavior concentrated in `src/main.cpp` unless a refactor is intentional.
+- Keep README and this file aligned with actual CLI flags/defaults.
+- If you change sync behavior, update both:
+  - `OVRTX Integration Contract`
+  - `Synchronization Model`
+- If you add/remove files or targets, update `Source Layout` and `Build and Run`.
 Options:
   --up Y|Z       Up axis for scene coordinate system (default: Y)
   --units m|cm   Scene units for camera distance scaling (default: cm)
@@ -257,7 +226,7 @@ The ovrtx library provides USD scene rendering via CUDA. Integration is handled 
 - Output is provided as CUarray via `OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`
 - `cuda_copy_array_to_surface(buffer_idx, ..., format, ...)` copies to double-buffered image
 - Error handling via `ovrtx_get_last_error()` function
-- Transform updated via `ovrtx_write_attribute()` with `OVRTX_SEMANTIC_TRANSFORM_4x4`
+- Transform updated via `ovrtx_write_attribute()` with `OVRTX_SEMANTIC_XFORM_MAT4x4`
 
 ### Output Format Mapping
 

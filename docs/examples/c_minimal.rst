@@ -13,61 +13,62 @@ C: Minimal Example
 
 This example shows basic initialization of the renderer, rendering a single frame from an RGB camera, mapping the output and writing the result to disk as a PNG.
 
-The example will load an example scene from S3 and output the resulting image to ``out.png``.
+The example loads an example scene from S3 and writes the resulting image to ``out.png``.
 
-The first time the example is run, driver shader compilation will be performed and cached. Subsequent runs will be much faster.
+The first time you run the example, the driver compiles and caches shaders. Subsequent runs are much faster.
 
 .. image:: ../../img/out.jpg
    :alt: Minimal example output
    :align: center
 
-Linux
------
+Build and Run
+-------------
 
-Prerequisites
-^^^^^^^^^^^^^
+.. tab-set::
 
-.. code-block:: bash
+   .. tab-item:: Linux
 
-   sudo apt install build-essential cmake
+      **Prerequisites**
 
-Building
-^^^^^^^^
+      .. code-block:: bash
 
-.. code-block:: bash
+         sudo apt install build-essential cmake
 
-   cmake -B build -DCMAKE_BUILD_TYPE=Release
-   cmake --build build
+      The ovrtx library is downloaded automatically at configure time. If ovrtx is already installed and available via ``CMAKE_PREFIX_PATH``, the local installation is used instead.
 
-Running
-^^^^^^^
+      **Building**
 
-.. code-block:: bash
+      .. code-block:: bash
 
-   ./build/minimal
+         cmake -B build -DCMAKE_BUILD_TYPE=Release
+         cmake --build build
 
-Windows
--------
+      **Running**
 
-Prerequisites
-^^^^^^^^^^^^^
+      .. code-block:: bash
 
-- `Visual Studio 2017+ <https://visualstudio.microsoft.com/downloads/>`_
+         ./build/minimal
 
-Building
-^^^^^^^^
+   .. tab-item:: Windows
 
-.. code-block:: pwsh
+      **Prerequisites**
 
-   cmake -B build
-   cmake --build --config Release
+      - `Visual Studio 2017+ <https://visualstudio.microsoft.com/downloads/>`_
 
-Running
-^^^^^^^
+      The ovrtx library is downloaded automatically at configure time. If ovrtx is already installed and available via ``CMAKE_PREFIX_PATH``, the local installation is used instead.
 
-.. code-block:: pwsh
+      **Building**
 
-   .\build\Release\minimal
+      .. code-block:: pwsh
+
+         cmake -B build
+         cmake --build build --config Release
+
+      **Running**
+
+      .. code-block:: pwsh
+
+         .\build\Release\minimal
 
 Licensing
 ---------

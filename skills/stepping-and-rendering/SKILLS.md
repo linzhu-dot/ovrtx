@@ -24,86 +24,33 @@ After loading USD content, you render frames by calling `step()`. Each step adva
 
 ### Single frame
 
-```python
-products = renderer.step(
-    render_products={"/Render/Camera"},
-    delta_time=1.0 / 60  # 60 Hz
-)
-```
+> **Source:** `examples/python/minimal/main.py` snippet `step`
 
 ### Iterate over results
 
-```python
-for product_name, product in products.items():
-    for frame in product.frames:
-        for var_name, render_var in frame.render_vars.items():
-            print(f"{product_name} / {var_name}")
-```
+> **Source:** `examples/python/minimal/main.py` snippet `read-render-output`
 
 ### Render loop
 
-```python
-for i in range(100):
-    products = renderer.step(
-        render_products={"/Render/Camera"},
-        delta_time=1.0 / 60
-    )
-    # process products...
-```
+> **Source:** `tests/test_ovrtx.py` snippet `step-and-read-output`
 
 ### Reset simulation time
 
-```python
-renderer.reset(time=0.0)  # Reset accumulated time to 0
-```
+> **Source:** `tests/test_ovrtx.py` snippet `reset-stage`
+>
+> `renderer.reset(time=0.0)` resets accumulated simulation time (distinct from `reset_stage()`).
 
 ## C
 
 ### Step, wait, fetch
 
-```c
-// 1. Define render products
-ovx_string_t rp_path = {"/Render/Camera", strlen("/Render/Camera")};
-ovrtx_render_product_set_t render_products = {};
-render_products.render_products = &rp_path;
-render_products.num_render_products = 1;
-
-// 2. Enqueue step
-ovrtx_step_result_handle_t step_result_handle = 0;
-ovrtx_enqueue_result_t enqueue_result =
-    ovrtx_step(renderer, render_products, 1.0 / 60.0, &step_result_handle);
-
-// 3. Wait for completion
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, enqueue_result.op_index, ovrtx_timeout_infinite, &wait_result);
-
-// 4. Fetch results
-ovrtx_render_product_set_outputs_t outputs = {};
-result = ovrtx_fetch_results(
-    renderer, step_result_handle, ovrtx_timeout_infinite, &outputs);
-
-// 5. Process outputs (see reading-render-output skill)
-// ...
-
-// 6. Destroy results when done
-ovrtx_destroy_results(renderer, step_result_handle);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `step-renderer`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `fetch-results`
 
 ### Iterate over C results
 
-```c
-for (size_t i = 0; i < outputs.output_count; ++i) {
-    ovrtx_render_product_output_t const& product = outputs.outputs[i];
-    for (size_t f = 0; f < product.output_frame_count; ++f) {
-        ovrtx_render_product_frame_output_t const& frame = product.output_frames[f];
-        for (size_t v = 0; v < frame.render_var_count; ++v) {
-            ovrtx_render_product_render_var_output_t const& var = frame.output_render_vars[v];
-            // var.render_var_name, var.output_handle
-        }
-    }
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `find-output-helper`
 
 ## Key Types / Functions
 

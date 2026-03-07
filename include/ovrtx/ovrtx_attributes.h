@@ -14,6 +14,77 @@
 #include <stddef.h>
 #include <string.h>
 
+/*----------------------------------------------------------------------
+* Transform attribute writes
+*/
+
+/*
+* Sets transform attribute values from row-major matrix 4x4 double values
+*/
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_mat(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* paths,
+    size_t path_count,
+    const ovrtx_xform_matrix44d_t* transforms);
+
+/*
+* Sets transform attribute values from position in double and a 3x3 row-major rotation matrix
+*/
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_pos_rot3x3(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* paths,
+    size_t path_count,
+    const ovrtx_xform_pos3d_rot3x3f_t* transforms);
+
+/*
+* Sets transform attribute values from position in double, a 4 float quaternion rotation and 3 float scale
+*/
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_pos_rot_scale(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* paths,
+    size_t path_count,
+    const ovrtx_xform_pos3d_rot4f_scale3f_t* transforms);
+
+/*
+* Sets the resetXformStack attribute for the given prims (one bool per prim).
+* When true: the prim's transform is treated as world-space; parent transforms are ignored when computing the prim's final transform.
+* When false (default): the prim's transform is in local space and is composed with the parent's world transform.
+* */
+static inline ovrtx_enqueue_result_t ovrtx_set_reset_xform_stack(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* paths,
+    size_t path_count,
+    const bool* values);
+
+/* ----------------------------------------------------------------------
+* Path and token attribute writes
+*/
+
+/*
+* Sets path attribute values from paths as ovx_string_t
+*/
+static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    ovx_string_t attribute_name,
+    const ovx_string_t* path_values);
+
+/*
+* Sets token attribute values from tokens as ovx_string_t
+*/
+static inline ovrtx_enqueue_result_t ovrtx_set_token_attributes(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    ovx_string_t attribute_name,
+    const ovx_string_t* token_values);
+
+
+/* ----------------------------------------------------------------------
+* Implementation
+*/
+
 /* C11 static_assert compatibility */
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
     #define OVRTX_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
@@ -75,19 +146,13 @@ static inline ovrtx_binding_desc_or_handle_t ovrtx_make_binding_desc(
     return bindingDesc;
 }
 
-/* Transform writes */
-typedef struct ovrtx_transform_matrix44d_t
-{
-    double v[16];
-} ovrtx_transform_matrix44d_t;
+OVRTX_STATIC_ASSERT(sizeof(ovrtx_xform_matrix44d_t) == 8 * 16, "ovrtx_xform_matrix44d_t size mismatch");
 
-OVRTX_STATIC_ASSERT(sizeof(ovrtx_transform_matrix44d_t) == 8 * 16, "ovrtx_transform_matrix44d_t size mismatch");
-
-static inline ovrtx_enqueue_result_t ovrtx_set_transforms_mat(
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_mat(
     ovrtx_renderer_t* instance,
     const ovx_string_t* paths,
     size_t path_count,
-    const ovrtx_transform_matrix44d_t* transforms)
+    const ovrtx_xform_matrix44d_t* transforms)
 {
     DLDataType type;
     DLTensor tensor;
@@ -105,27 +170,19 @@ static inline ovrtx_enqueue_result_t ovrtx_set_transforms_mat(
     buffer.tensor_count = 1;
     buffer.dirty_bits = NULL;
 
-    ovx_string_t localMatrix = literal_to_ovx_string("omni:fabric:localMatrix");
-    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_TRANSFORM_4x4, type);
+    ovx_string_t localMatrix = literal_to_ovx_string("omni:xform");
+    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_XFORM_MAT4x4, type);
 
     return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
 }
 
-typedef struct ovrtx_transform_pos3d_rot4f_scale3f_t
-{
-    double position[3];
-    float rotQuat[4];
-    float scale[3];
-    uint32_t padding;
-} ovrtx_transform_pos3d_rot4f_scale3f_t;
+OVRTX_STATIC_ASSERT(sizeof(ovrtx_xform_pos3d_rot4f_scale3f_t) == 56, "ovrtx_xform_pos3d_rot4f_scale3f_t size mismatch");
 
-OVRTX_STATIC_ASSERT(sizeof(ovrtx_transform_pos3d_rot4f_scale3f_t) == 56, "ovrtx_transform_pos3d_rot4f_scale3f_t size mismatch");
-
-static inline ovrtx_enqueue_result_t ovrtx_set_transforms_pos_rot_scale(
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_pos_rot_scale(
     ovrtx_renderer_t* instance,
     const ovx_string_t* paths,
     size_t path_count,
-    const ovrtx_transform_pos3d_rot4f_scale3f_t* transforms)
+    const ovrtx_xform_pos3d_rot4f_scale3f_t* transforms)
 {
     DLDataType type;
     DLTensor tensor;
@@ -143,26 +200,19 @@ static inline ovrtx_enqueue_result_t ovrtx_set_transforms_pos_rot_scale(
     buffer.tensor_count = 1;
     buffer.dirty_bits = NULL;
 
-    ovx_string_t localMatrix = literal_to_ovx_string("omni:fabric:localMatrix");
-    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT4f_SCALE3f, type);
+    ovx_string_t localMatrix = literal_to_ovx_string("omni:xform");
+    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_XFORM_POS3d_ROT4f_SCALE3f, type);
 
     return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
 }
 
-typedef struct ovrtx_transform_pos3d_rot3x3f_t
-{
-    double position[3];
-    float rotMatrix[9];  /* 3x3 column-major rotation matrix */
-    uint32_t padding;
-} ovrtx_transform_pos3d_rot3x3f_t;
+OVRTX_STATIC_ASSERT(sizeof(ovrtx_xform_pos3d_rot3x3f_t) == 64, "ovrtx_xform_pos3d_rot3x3f_t size mismatch");
 
-OVRTX_STATIC_ASSERT(sizeof(ovrtx_transform_pos3d_rot3x3f_t) == 64, "ovrtx_transform_pos3d_rot3x3f_t size mismatch");
-
-static inline ovrtx_enqueue_result_t ovrtx_set_transforms_pos_rot3x3(
+static inline ovrtx_enqueue_result_t ovrtx_set_xform_pos_rot3x3(
     ovrtx_renderer_t* instance,
     const ovx_string_t* paths,
     size_t path_count,
-    const ovrtx_transform_pos3d_rot3x3f_t* transforms)
+    const ovrtx_xform_pos3d_rot3x3f_t* transforms)
 {
     DLDataType type;
     DLTensor tensor;
@@ -180,9 +230,19 @@ static inline ovrtx_enqueue_result_t ovrtx_set_transforms_pos_rot3x3(
     buffer.tensor_count = 1;
     buffer.dirty_bits = NULL;
 
-    ovx_string_t localMatrix = literal_to_ovx_string("omni:fabric:localMatrix");
-    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT3x3f, type);
+    ovx_string_t localMatrix = literal_to_ovx_string("omni:xform");
+    binding_desc = ovrtx_make_binding_desc(paths, path_count, localMatrix, OVRTX_SEMANTIC_XFORM_POS3d_ROT3x3f, type);
 
+    return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
+}
+
+static inline ovrtx_enqueue_result_t ovrtx_set_reset_xform_stack(ovrtx_renderer_t* instance, const ovx_string_t* paths, size_t path_count, const bool* values)
+{
+    DLDataType type{ kDLUInt, 8, 1 };
+    DLTensor tensor = ovrtx_make_write_cpu_tensor(values, &path_count, type);
+    ovrtx_input_buffer_t buffer = { &tensor, 1, nullptr, {} };
+    ovrtx_binding_desc_or_handle_t binding_desc =
+        ovrtx_make_binding_desc(paths, path_count, literal_to_ovx_string("omni:resetXformStack"), OVRTX_SEMANTIC_NONE, type);
     return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
 }
 
@@ -194,7 +254,9 @@ static inline ovrtx_enqueue_result_t ovrtx_set_transforms_pos_rot3x3(
  * The input strings only need to be valid for the duration of the call.
  */
 
-// Maximum number of prims for stack-allocated tensor storage
+/*
+Maximum number of prims for stack - allocated tensor storage
+*/
 #define OVRTX_PATH_ATTR_STACK_TENSOR_COUNT 16
 
 /**
@@ -216,17 +278,19 @@ static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
     const ovx_string_t* path_values)
 {
     OVRTX_STATIC_ASSERT(sizeof(ovx_string_t) == 16, "ovx_string_t must be 16 bytes (128 bits)");
-    DLDataType type{ kDLUInt, 128, 1 };  // ovx_string_t = ptr (8 bytes) + length (8 bytes) = 16 bytes = 128 bits
+    DLDataType type{ kDLUInt, 128, 1 };  /* ovx_string_t = ptr(8 bytes) + length(8 bytes) = 16 bytes = 128 bits */
 
-    // Path attributes are USD relationships, which must be arrays.
-    // Each prim gets a single-element array containing its path value.
-    // Use stack storage for small counts, heap for larger.
+    /*
+    *   Path attributes are USD relationships, which must be arrays.
+    *   Each prim gets a single-element array containing its path value.
+    *   Use stack storage for small counts, heap for larger.
+    */
     DLTensor stackTensors[OVRTX_PATH_ATTR_STACK_TENSOR_COUNT];
     int64_t stackShapes[OVRTX_PATH_ATTR_STACK_TENSOR_COUNT];
     DLTensor* tensors = stackTensors;
     int64_t* shapes = stackShapes;
     
-    // Allocate heap storage if needed
+    /* Allocate heap storage if needed */
     DLTensor* heapTensors = nullptr;
     int64_t* heapShapes = nullptr;
     if (path_count > OVRTX_PATH_ATTR_STACK_TENSOR_COUNT)
@@ -237,10 +301,10 @@ static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
         shapes = heapShapes;
     }
 
-    // Initialize each tensor as a single-element array pointing to its path value
+    /*Initialize each tensor as a single-element array pointing to its path value*/
     for (size_t i = 0; i < path_count; ++i)
     {
-        shapes[i] = 1;  // Each array has 1 element
+        shapes[i] = 1;  /*Each array has 1 element*/
         tensors[i] = {};
         tensors[i].data = const_cast<ovx_string_t*>(&path_values[i]);
         tensors[i].device = { kDLCPU, 0 };
@@ -253,17 +317,17 @@ static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
 
     ovrtx_input_buffer_t buffer = { tensors, path_count, nullptr, {} };
 
-    // Build binding descriptor with is_array=true for relationship attribute
+    /*Build binding descriptor with is_array=true for relationship attribute*/
     ovrtx_binding_desc_or_handle_t binding_desc{};
     binding_desc.binding_desc.prim_list = { prim_paths, path_count };
     binding_desc.binding_desc.attribute_name = { {}, attribute_name };
-    binding_desc.binding_desc.attribute_type = { type, true, OVRTX_SEMANTIC_PATH_STRING };  // is_array=true
+    binding_desc.binding_desc.attribute_type = { type, true, OVRTX_SEMANTIC_PATH_STRING };  /*is_array=true*/
     binding_desc.binding_desc.prim_mode = OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY;
     binding_desc.binding_desc.flags = OVRTX_BINDING_FLAG_NONE;
 
     ovrtx_enqueue_result_t result = ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
 
-    // Clean up heap storage if allocated
+    /*Clean up heap storage if allocated*/
     if (heapTensors)
     {
         delete[] heapTensors;

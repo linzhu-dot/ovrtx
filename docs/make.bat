@@ -13,7 +13,7 @@ set BUILDDIR=_build
 REM Install docs dependencies from pyproject.toml via repo.bat if available
 if not exist "..\repo.bat" goto skip_repo
 echo Installing docs dependencies from pyproject.toml [docs] extra...
-call ..\repo.bat uv pip install -e "..[docs]"
+call ..\repo.bat uv pip install -e "..\python[docs]"
 set SPHINXBUILD=call ..\repo.bat uv run sphinx-build
 :skip_repo
 

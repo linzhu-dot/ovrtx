@@ -35,4 +35,4 @@ Running
 
    uv run main.py
 
-The first run will take some time as shaders are compiled and cached.
+The first run can take some time as shaders are compiled and cached.

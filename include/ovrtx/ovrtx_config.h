@@ -19,105 +19,32 @@ extern "C"
 {
 #endif
 
-/** Path to the OVRTX "binary package root". Used by the loader to find required runtime files. */
-#define OVRTX_CONFIG_KEY_BINARY_PACKAGE_ROOT_PATH "binary_package_root_path"
-/** If true, operations enqueued into the renderer stream execute synchronously (enqueue blocks until complete). */
-#define OVRTX_CONFIG_KEY_SYNC_MODE "sync_mode"
-/** If true, enables internal profiling in the renderer. */
-#define OVRTX_CONFIG_KEY_ENABLE_PROFILING "enable_profiling"
-/** If true, transform propagation during rendering uses GPU world transform updates. */
-#define OVRTX_CONFIG_KEY_READ_GPU_TRANSFORMS "read_gpu_transforms"
-/** If true, the renderer will output partial frames for incremental sensors. */
-#define OVRTX_CONFIG_KEY_OUTPUT_PARTIAL_FRAMES "output_partial_frames"
-/** Path to the log file for carb logging. */
-#define OVRTX_CONFIG_KEY_LOG_FILE_PATH "log_file_path"
-/** Log level for carb logging. */
-#define OVRTX_CONFIG_KEY_LOG_LEVEL "log_level"
-
-
 /**
- * Build a configuration entry for a boolean value.
- * @param key Configuration key.
+ * Build a config entry for a boolean setting.
+ * @param key Config key (e.g. OVRTX_CONFIG_SYNC_MODE). Must be from ovrtx_config_bool_t.
  * @param value Stored by value in the entry.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_bool(ovx_string_t key, bool value)
+static inline ovrtx_config_entry_t ovrtx_config_entry_bool(ovrtx_config_bool_t key, bool value)
 {
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_BOOL;
+    ovrtx_config_entry_t entry;
+    entry.key_type = OVRTX_CONFIG_KEY_TYPE_BOOL;
+    entry.key.bool_key = key;
     entry.value.bool_value = value;
     return entry;
 }
 
 /**
- * Build a configuration entry for a 64-bit integer value.
- * @param key Configuration key.
- * @param value Stored by value in the entry.
+ * Build a config entry for a string setting.
+ * @param key Config key (e.g. OVRTX_CONFIG_LOG_FILE_PATH). Must be from ovrtx_config_string_t.
+ * @param value String value. value.ptr must remain valid until the API call that consumes the
+ *              config returns.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_int64(ovx_string_t key, int64_t value)
+static inline ovrtx_config_entry_t ovrtx_config_entry_string(ovrtx_config_string_t key, ovx_string_t value)
 {
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_INT64;
-    entry.value.int_value = value;
-    return entry;
-}
-
-/**
- * Build a configuration entry for a 64-bit unsigned integer value.
- * @param key Configuration key.
- * @param value Stored by value in the entry.
- */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_uint64(ovx_string_t key, uint64_t value)
-{
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_UINT64;
-    entry.value.uint_value = value;
-    return entry;
-}
-
-/**
- * Build a configuration entry for a double value.
- * @param key Configuration key.
- * @param value Stored by value in the entry.
- */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_double(ovx_string_t key, double value)
-{
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_DOUBLE;
-    entry.value.double_value = value;
-    return entry;
-}
-
-/**
- * Build a configuration entry for a string value.
- * @param key Configuration key.
- * @param value String value. value.ptr must remain valid until the config is consumed.
- */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_string(ovx_string_t key, ovx_string_t value)
-{
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_STRING;
+    ovrtx_config_entry_t entry;
+    entry.key_type = OVRTX_CONFIG_KEY_TYPE_STRING;
+    entry.key.string_key = key;
     entry.value.string_value = value;
-    return entry;
-}
-
-/**
- * Build a configuration entry for a blob value.
- * @param key Configuration key.
- * @param data Blob value. data must remain valid until the config is consumed.
- * @param size Size of the blob in bytes.
- */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_blob(ovx_string_t key, const void* data, size_t size)
-{
-    ovrtx_renderer_config_entry_t entry;
-    entry.key = key;
-    entry.value.type = OVRTX_CONFIG_VALUE_BLOB;
-    entry.value.blob_value.data = data;
-    entry.value.blob_value.size = size;
     return entry;
 }
 
@@ -129,12 +56,9 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_blob(ovx_string_t
  *
  * @param path The root directory path. path.ptr must remain valid until the API call that consumes the config returns.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_binary_package_root_path(ovx_string_t path)
+static inline ovrtx_config_entry_t ovrtx_config_entry_binary_package_root_path(ovx_string_t path)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_BINARY_PACKAGE_ROOT_PATH;
-    key.length = sizeof(OVRTX_CONFIG_KEY_BINARY_PACKAGE_ROOT_PATH) - 1;
-    return ovrtx_config_entry_string(key, path);
+    return ovrtx_config_entry_string(OVRTX_CONFIG_BINARY_PACKAGE_ROOT_PATH, path);
 }
 
 /**
@@ -143,12 +67,9 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_binary_package_ro
  * When enabled, operations that are normally enqueued for stream-ordered execution will block
  * the calling thread until the operation has completed. Any errors will be returned immediately.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_sync_mode(bool sync_mode)
+static inline ovrtx_config_entry_t ovrtx_config_entry_sync_mode(bool sync_mode)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_SYNC_MODE;
-    key.length = sizeof(OVRTX_CONFIG_KEY_SYNC_MODE) - 1;
-    return ovrtx_config_entry_bool(key, sync_mode);
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_SYNC_MODE, sync_mode);
 }
 
 /**
@@ -156,12 +77,9 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_sync_mode(bool sy
  *
  * When enabled, the renderer collects additional profiling data. This can add overhead.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_enable_profiling(bool enable_profiling)
+static inline ovrtx_config_entry_t ovrtx_config_entry_enable_profiling(bool enable_profiling)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_ENABLE_PROFILING;
-    key.length = sizeof(OVRTX_CONFIG_KEY_ENABLE_PROFILING) - 1;
-    return ovrtx_config_entry_bool(key, enable_profiling);
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_ENABLE_PROFILING, enable_profiling);
 }
 
 /**
@@ -169,12 +87,9 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_enable_profiling(
  *
  * When enabled, the renderer uses GPU world transform propagation during rendering.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_read_gpu_transforms(bool read_gpu_transforms)
+static inline ovrtx_config_entry_t ovrtx_config_entry_read_gpu_transforms(bool read_gpu_transforms)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_READ_GPU_TRANSFORMS;
-    key.length = sizeof(OVRTX_CONFIG_KEY_READ_GPU_TRANSFORMS) - 1;
-    return ovrtx_config_entry_bool(key, read_gpu_transforms);
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_READ_GPU_TRANSFORMS, read_gpu_transforms);
 }
 
 /**
@@ -183,12 +98,32 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_read_gpu_transfor
  * When enabled, the renderer will output partial frames for incremental sensors.
  * When disabled, the renderer will only output full frames for incremental sensors.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_output_partial_frames(bool partial_frames)
+static inline ovrtx_config_entry_t ovrtx_config_entry_output_partial_frames(bool partial_frames)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_OUTPUT_PARTIAL_FRAMES;
-    key.length = sizeof(OVRTX_CONFIG_KEY_OUTPUT_PARTIAL_FRAMES) - 1;
-    return ovrtx_config_entry_bool(key, partial_frames);
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_OUTPUT_PARTIAL_FRAMES, partial_frames);
+}
+
+/**
+ * Keep the renderer system alive after all instances are destroyed.
+ *
+ * When enabled, the shared RendererWrapperSystem (common GPU resources) is not destroyed
+ * when the last renderer instance is destroyed, so a subsequent create_renderer reuses it.
+ * When disabled (default), the system is destroyed when the last renderer instance is destroyed.
+ */
+static inline ovrtx_config_entry_t ovrtx_config_entry_keep_system_alive(bool keep_system_alive)
+{
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_KEEP_SYSTEM_ALIVE, keep_system_alive);
+}
+
+/**
+ * Select graphics API.
+ *
+ * When true, the renderer uses Vulkan. When false, it uses DX12 (Windows only).
+ * If this entry is not provided, the platform default is used (DX12 on Windows, Vulkan on Linux).
+ */
+static inline ovrtx_config_entry_t ovrtx_config_entry_use_vulkan(bool use_vulkan)
+{
+    return ovrtx_config_entry_bool(OVRTX_CONFIG_USE_VULKAN, use_vulkan);
 }
 
 /**
@@ -204,12 +139,9 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_output_partial_fr
  *
  * @param path Log file path. path.ptr must remain valid until the API call that consumes the config returns.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_log_file_path(ovx_string_t path)
+static inline ovrtx_config_entry_t ovrtx_config_entry_log_file_path(ovx_string_t path)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_LOG_FILE_PATH;
-    key.length = sizeof(OVRTX_CONFIG_KEY_LOG_FILE_PATH) - 1;
-    return ovrtx_config_entry_string(key, path);
+    return ovrtx_config_entry_string(OVRTX_CONFIG_LOG_FILE_PATH, path);
 }
 
 /**
@@ -220,18 +152,27 @@ static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_log_file_path(ovx
  *
  * @param level Log level string. level.ptr must remain valid until the API call that consumes the config returns.
  */
-static inline ovrtx_renderer_config_entry_t ovrtx_config_entry_log_level(ovx_string_t level)
+static inline ovrtx_config_entry_t ovrtx_config_entry_log_level(ovx_string_t level)
 {
-    ovx_string_t key;
-    key.ptr = OVRTX_CONFIG_KEY_LOG_LEVEL;
-    key.length = sizeof(OVRTX_CONFIG_KEY_LOG_LEVEL) - 1;
-    return ovrtx_config_entry_string(key, level);
+    return ovrtx_config_entry_string(OVRTX_CONFIG_LOG_LEVEL, level);
 }
 
+/**
+ * Configure active CUDA GPUs for rendering.
+ *
+ * Specifies which GPUs to use for rendering by their CUDA device indices.
+ * The indices are translated to Vulkan device indices internally by GPU Foundation.
+ * This is useful when CUDA and Vulkan enumerate devices in different orders.
+ *
+ * @param cuda_gpus Comma-separated list of CUDA device indices (e.g., "0,1,2").
+ *                  cuda_gpus.ptr must remain valid until the API call that consumes the config returns.
+ */
+static inline ovrtx_config_entry_t ovrtx_config_entry_active_cuda_gpus(ovx_string_t cuda_gpus)
+{
+    return ovrtx_config_entry_string(OVRTX_CONFIG_ACTIVE_CUDA_GPUS, cuda_gpus);
+}
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* OVRTX_CONFIG_H */
-
-

@@ -8,15 +8,21 @@ SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = .
 BUILDDIR      = _build
 
-# Project root (where pyproject.toml lives)
-PROJECT_ROOT  = ..
+# Project root (absolute so paths work after cd)
+PROJECT_ROOT  = $(abspath ..)
 
-# uv run with docs dependencies
-UVRUN         = cd $(PROJECT_ROOT) && uv run --extra docs
+# Python package directory (where pyproject.toml lives)
+PYTHON_DIR    = $(PROJECT_ROOT)/python
+
+# uv run with docs dependencies (cd into python/ for pyproject.toml, use absolute paths for sphinx)
+UVRUN         = cd $(PYTHON_DIR) && uv run --extra docs
+
+# Sphinx source and build dirs as absolute paths (needed because UVRUN changes cwd)
+DOCS_DIR      = $(PROJECT_ROOT)/docs
 
 # Put it first so that "make" without argument is like "make help".
 help:
-	@$(UVRUN) $(SPHINXBUILD) -M help "docs" "docs/$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	@$(UVRUN) $(SPHINXBUILD) -M help "$(DOCS_DIR)" "$(DOCS_DIR)/$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
 .PHONY: help Makefile doxygen clean html
 
@@ -33,4 +39,4 @@ clean:
 
 # Build HTML with Doxygen first, using uv for dependencies
 html: doxygen
-	$(UVRUN) $(SPHINXBUILD) -M html "docs" "docs/$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	$(UVRUN) $(SPHINXBUILD) -M html "$(DOCS_DIR)" "$(DOCS_DIR)/$(BUILDDIR)" $(SPHINXOPTS) $(O)

@@ -24,71 +24,31 @@ description: Cloning USD subtrees to create copies at new paths. Use when user a
 
 ### Clone to a single target
 
-```python
-renderer.clone_usd("/World/Template", ["/World/Copy1"])
-```
+> **Source:** `tests/test_ovrtx.py` snippet `clone-usd`
 
 ### Clone to multiple targets
 
-```python
-renderer.clone_usd(
-    "/World/Robot",
-    [f"/World/Robot_{i}" for i in range(10)]
-)
-```
+> **Source:** `tests/test_ovrtx.py` snippet `clone-usd`
 
 ### Async clone
 
-```python
-op = renderer.clone_usd_async("/World/Source", ["/World/Target"])
-op.wait()  # or poll with timeout
-```
+> **Source:** `tests/test_ovrtx.py` snippet `clone-usd`
+>
+> For async: `op = renderer.clone_usd_async(source, targets)` followed by `op.wait()`.
 
 ## C
 
 ### Clone to multiple targets
 
-```c
-ovx_string_t source = {"/World/Template", strlen("/World/Template")};
-
-ovx_string_t targets[] = {
-    {"/World/Copy_0", strlen("/World/Copy_0")},
-    {"/World/Copy_1", strlen("/World/Copy_1")},
-    {"/World/Copy_2", strlen("/World/Copy_2")},
-};
-
-ovrtx_enqueue_result_t result = ovrtx_clone_usd(
-    renderer, source, targets, 3);
-
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "clone_usd enqueue failed: %.*s\n",
-            (int)error.length, error.ptr);
-}
-```
+> **Source:** `tests/test_ovrtx.py` snippet `clone-usd` (Python equivalent)
+>
+> C: `ovrtx_enqueue_result_t result = ovrtx_clone_usd(renderer, source, targets, count);`
 
 ### Wait for completion
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t wait_status =
-    ovrtx_wait_op(renderer, result.op_index, ovrtx_timeout_infinite, &wait_result);
-
-if (wait_status.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "wait_op failed: %.*s\n", (int)error.length, error.ptr);
-}
-
-if (wait_result.num_error_ops > 0) {
-    for (size_t i = 0; i < wait_result.num_error_ops; ++i) {
-        ovrtx_op_id_t failed_id = wait_result.error_op_ids[i];
-        ovx_string_t error = ovrtx_get_last_op_error(failed_id);
-        fprintf(stderr, "Clone op %llu failed: %.*s\n",
-                (unsigned long long)failed_id,
-                (int)error.length, error.ptr);
-    }
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Same `ovrtx_wait_op` pattern applies to clone operations.
 
 ## Key Types / Functions
 

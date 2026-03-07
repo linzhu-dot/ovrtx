@@ -11,13 +11,21 @@
 Getting Started in C
 ====================
 
-The C/C++ examples require CMake and a development environment. On Windows this is provided by `Visual Studio 2017 or newer <https://visualstudio.microsoft.com/>`_. On Linux (Ubuntu):
+The C/C++ examples require CMake and a development environment. Install the prerequisites for your platform:
 
-.. code-block:: bash
+.. tab-set::
 
-   sudo apt-get install build-essential cmake
+   .. tab-item:: Windows
 
-To get started, first clone `the repository <https://github.com/NVIDIA-Omniverse/ovrtx>`__ and build and run the first example using CMake:
+      Install `Visual Studio 2017 or newer <https://visualstudio.microsoft.com/>`_ (which provides CMake and a C++ toolchain).
+
+   .. tab-item:: Linux (Ubuntu)
+
+      .. code-block:: bash
+
+         sudo apt-get install build-essential cmake
+
+Next, clone `the repository <https://github.com/NVIDIA-Omniverse/ovrtx>`__ and configure the minimal example:
 
 .. code-block:: bash
 
@@ -25,19 +33,23 @@ To get started, first clone `the repository <https://github.com/NVIDIA-Omniverse
    cd ovrtx/examples/c/minimal
    cmake -B build
 
-Then, on Windows:
+Last, build and run the minimal example (choose your platform):
 
-.. code-block:: text
+.. tab-set::
 
-   cmake --build build --config Release
-   .\build\Release\minimal.exe
+   .. tab-item:: Windows
 
-On Linux:
+      .. code-block:: text
 
-.. code-block:: bash
+         cmake --build build --config Release
+         .\build\Release\minimal.exe
 
-   cmake --build build --config Release
-   ./build/minimal
+   .. tab-item:: Linux
+
+      .. code-block:: bash
+
+         cmake --build build --config Release
+         ./build/minimal
 
 The minimal example shows how to create the renderer, load an OpenUSD scene and render a single image, copying the results back to the CPU for writing out as a PNG.
 
@@ -45,9 +57,9 @@ The minimal example shows how to create the renderer, load an OpenUSD scene and 
    :alt: Minimal example output
    :align: center
 
-The resulting image will be written to ``./out.png`` and can be inspected with any image viewer.
+The resulting image is written to ``./out.png`` and you can inspect it with any image viewer.
 
-Note that the first time a program built against ovrtx is run, it will compile and cache necessary shaders, which may take some time depending on your system. Subsequent runs will use the cached shaders and will be fast.
+The first time you run a program built against ovrtx, it compiles and caches necessary shaders, which may take some time depending on your system. Subsequent runs use the cached shaders and are faster.
 
 Installation
 ------------
@@ -93,7 +105,7 @@ The ovrtx dynamic library will automatically load the other dependencies at runt
 
 .. code-block:: c
 
-   ovrtx_renderer_config_entry_t config_entries[] = {
+   ovrtx_config_entry_t config_entries[] = {
        ovrtx_config_entry_binary_package_root_path(ovx_string("/path/where/bin/contents/live"))
    };
 
@@ -109,9 +121,10 @@ Note that when static linking ovrtx, you MUST provide the binary package root pa
 Minimal Example
 ---------------
 
-.. literalinclude:: ../../examples/c/minimal/main.cpp
+.. filtered-literalinclude:: ../../examples/c/minimal/main.cpp
    :language: cpp
-   :lines: 11-
+   :start-after: // its affiliates is strictly prohibited.
+   :exclude-pattern: ^\s*//\s*\[/?snippet:
 
 .. image:: ../../img/example-minimal.jpg
    :alt: Minimal example output

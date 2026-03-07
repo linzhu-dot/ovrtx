@@ -11,7 +11,7 @@
 Getting Started in Python
 =========================
 
-During Early Access, we recommend using the `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ Python package and project manager. All the examples in `the repository <https://github.com/NVIDIA-Omniverse/ovrtx>`__ contain ``pyproject.toml`` files that are tested with uv.
+During Early Access, use the `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ Python package and project manager. All the examples in `the repository <https://github.com/NVIDIA-Omniverse/ovrtx>`__ contain ``pyproject.toml`` files that are tested with uv.
 
 Python 3.10–3.13 is required.
 
@@ -29,14 +29,15 @@ To get started, first clone `the repository <https://github.com/NVIDIA-Omniverse
    :alt: Minimal example output
    :align: center
 
-Note that the first time a program built against ovrtx is run, it will compile and cache necessary shaders, which may take some time depending on your system. Subsequent runs will use the cached shaders and will be fast.
+The first time you run a program built against ovrtx, it compiles and caches necessary shaders, which may take some time depending on your system. Subsequent runs use the cached shaders and are faster.
 
 Minimal Example
 ---------------
 
-.. literalinclude:: ../../examples/python/minimal/main.py
+.. filtered-literalinclude:: ../../examples/python/minimal/main.py
    :language: python
-   :lines: 11-
+   :start-after: # its affiliates is strictly prohibited.
+   :exclude-pattern: ^\s*#\s*\[/?snippet:
 
 The example above is provided as a Python project in the ``examples/python/minimal`` directory in `the repository <https://github.com/NVIDIA-Omniverse/ovrtx>`__.
 

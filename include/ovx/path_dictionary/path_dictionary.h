@@ -93,7 +93,7 @@ extern "C"
                                             ovx_primpath_t* out_paths,
                                             size_t* out_num_paths);
 
-        // release resources associated with a returned error string
+        /*release resources associated with a returned error string*/
         void (*release_error)(path_dictionary_context_t* context, 
                                 ovx_string_t error);
 

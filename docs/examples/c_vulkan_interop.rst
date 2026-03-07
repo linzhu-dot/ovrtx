@@ -13,65 +13,62 @@ C: Vulkan Interop
 
 Demonstrates how to integrate ovrtx with Vulkan by sharing renders on the GPU.
 
-ovrtx outputs are mapped to CUDA arrays every frame, which are then copied to CUDA-exported VkImage memory. The resulting textures are then sampled on a fullscreen quad to display the render in real time in a GLFW window. Memory access between CUDA and Vulkan is synchronized using timeline semaphores.
+The example maps ovrtx outputs to CUDA arrays every frame, then copies them to CUDA-exported VkImage memory. A fullscreen quad samples the resulting textures to display the render in real time in a GLFW window. Memory access between CUDA and Vulkan is synchronized using timeline semaphores.
 
 .. image:: ../../img/example-vulkan-interop.gif
    :alt: Vulkan interop example
    :align: center
 
-Linux
------
+Build and Run
+-------------
 
-Prerequisites
-^^^^^^^^^^^^^
+.. tab-set::
 
-- ``sudo apt install build-essential cmake``
-- `Vulkan SDK 1.3.250+ <https://vulkan.lunarg.com/sdk/home>`_
-- `CUDA Toolkit 12.0+ <https://developer.nvidia.com/cuda-downloads>`_
+   .. tab-item:: Linux
 
-Other dependencies (ovrtx, GLM, volk, unordered_dense, glfw3) are downloaded automatically at configure time via CMake FetchContent.
+      **Prerequisites**
 
-Building
-^^^^^^^^
+      - ``sudo apt install build-essential cmake``
+      - `Vulkan SDK 1.3.250+ <https://vulkan.lunarg.com/sdk/home>`_
+      - `CUDA Toolkit 12.0+ <https://developer.nvidia.com/cuda-downloads>`_
 
-.. code-block:: bash
+      If ovrtx or glfw3 are already installed and available via ``CMAKE_PREFIX_PATH``, the local installations are used. Otherwise they are downloaded automatically at configure time. Other dependencies (GLM, volk, unordered_dense) are always downloaded via FetchContent.
 
-   cmake -B build -DCMAKE_BUILD_TYPE=Release
-   cmake --build build
+      **Building**
 
-Running
-^^^^^^^
+      .. code-block:: bash
 
-.. code-block:: bash
+         cmake -B build -DCMAKE_BUILD_TYPE=Release
+         cmake --build build
 
-   ./build/ovrtx-interop
+      **Running**
 
-Windows
--------
+      .. code-block:: bash
 
-Prerequisites
-^^^^^^^^^^^^^
+         ./build/ovrtx-interop
 
-- `Visual Studio 2017+ <https://visualstudio.microsoft.com/downloads/>`_
-- `Vulkan SDK 1.3.250+ <https://vulkan.lunarg.com/sdk/home>`_
-- `CUDA Toolkit 12.0+ <https://developer.nvidia.com/cuda-downloads>`_
+   .. tab-item:: Windows
 
-Other dependencies (ovrtx, GLM, volk, unordered_dense, glfw3) are downloaded automatically at configure time via CMake FetchContent.
+      **Prerequisites**
 
-Building
-^^^^^^^^
+      - `Visual Studio 2017+ <https://visualstudio.microsoft.com/downloads/>`_
+      - `Vulkan SDK 1.3.250+ <https://vulkan.lunarg.com/sdk/home>`_
+      - `CUDA Toolkit 12.0+ <https://developer.nvidia.com/cuda-downloads>`_
 
-.. code-block:: pwsh
+      If ovrtx or glfw3 are already installed and available via ``CMAKE_PREFIX_PATH``, the local installations are used. Otherwise they are downloaded automatically at configure time. Other dependencies (GLM, volk, unordered_dense) are always downloaded via FetchContent.
 
-   cmake -B build
-   cmake --build --config Release
+      **Building**
 
-Running
-^^^^^^^
+      .. code-block:: pwsh
 
-.. code-block:: pwsh
+         cmake -B build
+         cmake --build build --config Release
 
-   .\build\Release\ovrtx-interop.exe
+      **Running**
+
+      .. code-block:: pwsh
+
+         .\build\Release\ovrtx-interop.exe
 
 Scene Configuration
 -------------------

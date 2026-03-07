@@ -20,6 +20,14 @@ typedef struct ovx_string_t
     size_t length;
 } ovx_string_t;
 
+/* Macro for creating ovx_string_t from string literals */
+#define literal_to_ovx_string(str) ovx_string_t{ (str), sizeof(str) - 1 }
+
+static inline bool is_ovx_string_empty(const ovx_string_t* str)
+{
+    return !str || str->ptr == NULL || str->length == 0;
+}
+
 typedef uint64_t ovx_token_t;
 typedef uint64_t ovx_primpath_t;
 typedef uint64_t ovx_primpath_list_t;

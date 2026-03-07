@@ -26,109 +26,53 @@ In C, all enqueue calls return immediately with an `ovrtx_op_id_t` that can be p
 
 ### Non-blocking USD load
 
-```python
-op = renderer.add_usd_async("/path/to/scene.usda")
-
-# Poll without blocking
-result = op.wait(timeout_ns=0)
-if result is None:
-    print("Still loading...")
-else:
-    print(f"Loaded, handle: {result}")
-
-# Or wait with a custom timeout (5 seconds)
-result = op.wait(timeout_ns=5_000_000_000)
-```
+> **Source:** `tests/test_ovrtx.py` snippet `step-async-polling`
+>
+> The same polling pattern applies to `add_usd_async` — call `op.wait(timeout_ns=0)` to poll, or `op.wait()` to block.
 
 ### Non-blocking step with two-stage timeout
 
-```python
-result = renderer.step_async(
-    render_products={"/Render/Camera"},
-    delta_time=1.0/60
-)
-
-# Wait with independent timeouts for step and fetch
-products = result.wait(
-    step_timeout_ns=5_000_000_000,   # 5s for raytracing
-    fetch_timeout_ns=100_000_000     # 100ms for memory transfer
-)
-
-if products is None:
-    if not result.step_complete:
-        print("Step timed out")
-    else:
-        print("Fetch timed out")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `step-async-polling`
 
 ### Infinite wait (default)
 
-```python
-# These are equivalent:
-products = renderer.step(render_products={"/Render/Camera"}, delta_time=1.0/60)
-# and:
-result = renderer.step_async(render_products={"/Render/Camera"}, delta_time=1.0/60)
-products = result.wait()
-```
+> **Source:** `examples/python/minimal/main.py` snippet `step`
+>
+> The synchronous `step()` is equivalent to `step_async().wait()`.
 
 ## C
 
 ### Poll with zero timeout
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, op_id, ovrtx_timeout_t{0}, &wait_result);
-
-if (result.status == OVRTX_API_TIMEOUT || wait_result.lowest_pending_op_id != 0) {
-    // Still pending (non-blocking poll)
-} else if (result.status == OVRTX_API_SUCCESS) {
-    // All operations up to op_id are complete
-} else {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "wait_op failed: %.*s\n", (int)error.length, error.ptr);
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> The load snippet demonstrates polling with `ovrtx_timeout_t{0}`.
 
 ### Poll loop with sleep
 
-```c
-ovrtx_op_wait_result_t wait_result;
-do {
-    ovrtx_result_t result =
-        ovrtx_wait_op(renderer, op_id, ovrtx_timeout_t{0}, &wait_result);
-    if (result.status == OVRTX_API_ERROR) {
-        ovx_string_t error = ovrtx_get_last_error();
-        fprintf(stderr, "wait_op failed: %.*s\n", (int)error.length, error.ptr);
-        break;
-    }
-    if (wait_result.lowest_pending_op_id != 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-} while (wait_result.lowest_pending_op_id != 0);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
 
 ### Block indefinitely
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, op_id, ovrtx_timeout_infinite, &wait_result);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `step-renderer`
+>
+> Uses `ovrtx_timeout_infinite` to block until completion.
 
 ### Check for errors after wait
 
-```c
-if (wait_result.num_error_ops > 0) {
-    for (size_t i = 0; i < wait_result.num_error_ops; ++i) {
-        ovrtx_op_id_t failed_id = wait_result.error_op_ids[i];
-        ovx_string_t error = ovrtx_get_last_op_error(failed_id);
-        fprintf(stderr, "Op %llu failed: %.*s\n",
-                (unsigned long long)failed_id,
-                (int)error.length, error.ptr);
-    }
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Check `wait_result.num_error_ops` after any `ovrtx_wait_op` call.
+
+### Query operation progress (C)
+
+For long-running operations (e.g., USD loading), you can query progress and named resource counters:
+
+> **Source:** No example coverage yet. C API pattern:
+>
+> Call `ovrtx_query_op_status(renderer, op_id, &status)` to get progress and counters, then `ovrtx_release_op_status(renderer, &status)` to release. See the `ovrtx_op_status_t` type documentation.
+
+Counter names are operation-dependent (e.g., `"shaders"`, `"textures"`, `"materials"` during USD loading). A `total` of 0 means the total is not yet known.
 
 ## Key Types / Functions
 
@@ -138,6 +82,8 @@ if (wait_result.num_error_ops > 0) {
 | `Operation.wait(timeout_ns=0)` | `ovrtx_wait_op` with `timeout.time_out_ns = 0` |
 | `RendererResult.wait(step_timeout_ns, fetch_timeout_ns)` | manual two-stage: `ovrtx_wait_op` then `ovrtx_fetch_results` |
 | `RuntimeError` on failure | `wait_result.num_error_ops > 0` |
+| (not exposed) | `ovrtx_query_op_status(renderer, op_id, &status)` -- progress + resource counters |
+| (not exposed) | `ovrtx_release_op_status(renderer, &status)` -- must call after each query |
 
 C timeout constants:
 - `ovrtx_timeout_t{0}` -- non-blocking poll

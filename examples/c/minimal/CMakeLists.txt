@@ -12,6 +12,8 @@ cmake_minimum_required(VERSION 3.15)
 project(minimal)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(FETCHCONTENT_QUIET FALSE)
 # Override FetchContent's base directory to share large deps among examples.

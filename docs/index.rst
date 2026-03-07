@@ -11,9 +11,9 @@
 NVIDIA ovrtx
 ============
 
-ovrtx is a lightweight C and Python SDK for Omniverse RTX, allowing developers to integrate RTX sensor simulation and visualization easily into their applications.
+Omniverse RTX is the technology that provides real-time, physically accurate sensor simulation and rendering for `Physical AI <https://www.nvidia.com/en-us/glossary/generative-physical-ai/>`_, targeting robotics learning, synthetic data generation, and industrial and design workflows. **ovrtx** is the lightweight C and Python SDK that exposes Omniverse RTX—you use it to integrate that sensor simulation and visualization into your own applications.
 
-Omniverse RTX provides real-time, physically accurate sensor simulation and rendering for `Physical AI <https://www.nvidia.com/en-us/glossary/generative-physical-ai/>`_, targeting robotics learning, synthetic data generation, and industrial and design workflows.
+In this documentation you will find getting started guides for Python and C, API references, and example projects.
 
 * :doc:`python_api/getting_started`
 * :doc:`c_api/getting_started`
@@ -23,7 +23,7 @@ Omniverse RTX provides real-time, physically accurate sensor simulation and rend
    ovrtx is currently **pre-release** software.
 
 .. image:: ../img/warehouse.jpg
-   :alt: NVIDIA ovrtx warehouse scene
+   :alt: Warehouse scene rendered with ovrtx RTX sensor simulation
    :align: center
 
 Features

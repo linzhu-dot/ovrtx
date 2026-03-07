@@ -15,6 +15,8 @@ The first time the example is run, driver shader compilation will be performed a
 
 - `sudo apt install build-essential cmake`
 
+The ovrtx library is downloaded automatically at configure time. If ovrtx is already installed and available via `CMAKE_PREFIX_PATH`, the local installation is used instead.
+
 ### Building
 
 ```bash
@@ -33,6 +35,8 @@ cmake --build build
 ### Prerequisites
 
 - [Visual Studio 2017+](https://visualstudio.microsoft.com/downloads/)
+
+The ovrtx library is downloaded automatically at configure time. If ovrtx is already installed and available via `CMAKE_PREFIX_PATH`, the local installation is used instead.
 
 ### Building
 

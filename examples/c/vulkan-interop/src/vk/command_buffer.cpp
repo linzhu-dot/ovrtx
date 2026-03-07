@@ -26,6 +26,15 @@ auto CommandBuffer::end() -> void {
     vkEndCommandBuffer(_cmd);
 }
 
+auto CommandBuffer::begin_rendering(
+    VkRenderingInfo const& rendering_info) -> void {
+    vkCmdBeginRendering(_cmd, &rendering_info);
+}
+
+auto CommandBuffer::end_rendering() -> void {
+    vkCmdEndRendering(_cmd);
+}
+
 auto CommandBuffer::reset_query_pool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) -> void {
     vkCmdResetQueryPool(_cmd, query_pool, first_query, query_count);
 }
@@ -36,7 +45,8 @@ auto CommandBuffer::write_timestamp(VkPipelineStageFlagBits stage, VkQueryPool q
 
 auto CommandBuffer::image_memory_barrier(VkImage image, VkImageAspectFlags aspect_mask,
                                           VkImageLayout old_layout, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
-                                          VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) -> void {
+                                          VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access,
+                                          uint32_t src_queue_family, uint32_t dst_queue_family) -> void {
     VkImageMemoryBarrier2 barrier = {};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = src_stage;
@@ -45,8 +55,8 @@ auto CommandBuffer::image_memory_barrier(VkImage image, VkImageAspectFlags aspec
     barrier.dstAccessMask = dst_access;
     barrier.oldLayout = old_layout;
     barrier.newLayout = new_layout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.srcQueueFamilyIndex = src_queue_family;
+    barrier.dstQueueFamilyIndex = dst_queue_family;
     barrier.image = image;
     barrier.subresourceRange.aspectMask = aspect_mask;
     barrier.subresourceRange.baseMipLevel = 0;

@@ -17,7 +17,9 @@ import os
 import sys
 
 # Add the package to the path for autodoc
-sys.path.insert(0, os.path.abspath(".."))
+sys.path.insert(0, os.path.abspath("../python"))
+# Add local extensions
+sys.path.insert(0, os.path.abspath("_ext"))
 
 # -- Project information -----------------------------------------------------
 project = "ovrtx"
@@ -37,8 +39,11 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
+    "sphinx_copybutton",
+    "sphinx_design",
     "sphinx_mdinclude",
     "breathe",
+    "filtered_literalinclude",
 ]
 
 # -- Options for Breathe (C API documentation) -------------------------------

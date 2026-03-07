@@ -56,7 +56,6 @@ $env:PATH = "C:\path\to\ovrtx\bin;$env:PATH"
 | `LD_LIBRARY_PATH` (Linux) | Yes | Must include path to `libovrtx-dynamic.so` |
 | `PATH` (Windows) | Yes | Must include path to `ovrtx-dynamic.dll` |
 | `PYTHONPATH` | Conditional | Required if ovrtx not installed via pip |
-| `TEST_DATA_ROOT` | Direct exec only | Directory containing USD test scenes (only for `python -m ovrtx.tests.test_ovrtx`) |
 
 ## Installing Dependencies
 
@@ -98,23 +97,6 @@ pytest ovrtx/tests/ --junit-xml=results.xml
 # Custom output directory for test artifacts
 pytest ovrtx/tests/ --output=/path/to/output
 ```
-
-### Via Direct Execution
-
-The test module includes a `__main__` block for quick testing during development.
-Requires `TEST_DATA_ROOT` environment variable pointing to USD test scenes:
-
-```bash
-# Set test data path (required for direct execution)
-export TEST_DATA_ROOT=/path/to/usd/test/scenes  # Linux
-# or: $env:TEST_DATA_ROOT = "C:\path\to\scenes"  # Windows PowerShell
-
-# Run directly (runs a subset of tests without pytest)
-python -m ovrtx.tests.test_ovrtx
-```
-
-> **Note:** Direct execution runs a simplified test flow for development convenience.
-> For complete test coverage and reporting, use pytest with `--test-data`.
 
 ## Command-Line Options
 
@@ -162,8 +144,6 @@ pytest.fail: USD scene file not found: .../cube.usda
 ```bash
 pytest ovrtx/tests/ --test-data=/path/to/usd/test/scenes
 ```
-
-For direct execution (`python -m ovrtx.tests.test_ovrtx`), set the `TEST_DATA_ROOT` environment variable instead.
 
 ### Import Error
 

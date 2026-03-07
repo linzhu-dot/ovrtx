@@ -61,62 +61,13 @@ Update the `FetchContent_Declare` URL inside `ovrtx.cmake` to point to the appro
 
 ## Minimal main.cpp
 
-```cpp
-#include <ovrtx/ovrtx.h>
-#include <ovrtx/ovrtx_config.h>
-#include <ovrtx/ovrtx_types.h>
-
-#include <cstdio>
-#include <cstring>
-#include <stdexcept>
-#include <thread>
-#include <chrono>
-
-int main() {
-    // Create renderer
-    ovrtx_renderer_t* renderer = nullptr;
-    ovrtx_config_t config = {};
-    ovrtx_result_t result = ovrtx_create_renderer(&config, &renderer);
-    if (result.status == OVRTX_API_ERROR) {
-        fprintf(stderr, "Failed to create renderer\n");
-        return 1;
-    }
-
-    // Load USD scene
-    ovrtx_usd_handle_t usd_handle = 0;
-    ovrtx_usd_input_t usd_input = {};
-    usd_input.usd_file_path = {"scene.usda", strlen("scene.usda")};
-
-    ovrtx_enqueue_result_t enqueue = ovrtx_add_usd(
-        renderer, usd_input, {"", 0}, &usd_handle);
-
-    // Wait for load
-    ovrtx_op_wait_result_t wait_result;
-    ovrtx_wait_op(renderer, enqueue.op_index,
-                  ovrtx_timeout_infinite, &wait_result);
-
-    // Step renderer
-    ovx_string_t rp = {"/Render/Camera", strlen("/Render/Camera")};
-    ovrtx_render_product_set_t products = { &rp, 1 };
-    ovrtx_step_result_handle_t step_handle = 0;
-
-    enqueue = ovrtx_step(renderer, products, 1.0 / 60.0, &step_handle);
-    ovrtx_wait_op(renderer, enqueue.op_index,
-                  ovrtx_timeout_infinite, &wait_result);
-
-    // Fetch and process results...
-    ovrtx_render_product_set_outputs_t outputs = {};
-    ovrtx_fetch_results(renderer, step_handle,
-                        ovrtx_timeout_infinite, &outputs);
-
-    // (map output, read pixels, unmap -- see reading-render-output skill)
-
-    // Cleanup
-    ovrtx_destroy_results(renderer, step_handle);
-    ovrtx_destroy_renderer(renderer);
-    return 0;
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `check-error-helper`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `create-renderer`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> See the full minimal example for the complete flow including step, fetch, map, and cleanup.
 
 ## Build and Run
 
@@ -153,7 +104,7 @@ Set `binary_package_root_path` only when:
 For these cases, use `ovrtx_config_entry_binary_package_root_path()` to tell ovrtx where the binary package root lives:
 
 ```c
-ovrtx_renderer_config_entry_t entries[] = {
+ovrtx_config_entry_t entries[] = {
     ovrtx_config_entry_binary_package_root_path(
         {"/custom/deploy/path", strlen("/custom/deploy/path")})
 };

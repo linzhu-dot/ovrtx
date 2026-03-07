@@ -8,8 +8,22 @@
 
 import sys
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
+from .bindings import (
+    OVRTX_BINDING_PRIM_MODE_CREATE_NEW,
+    OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY,
+    OVRTX_BINDING_PRIM_MODE_MUST_EXIST,
+    OVRTX_DATA_ACCESS_ASYNC,
+    OVRTX_DATA_ACCESS_SYNC,
+    OVRTX_MAP_DEVICE_TYPE_CPU,
+    OVRTX_MAP_DEVICE_TYPE_CUDA,
+    OVRTX_SEMANTIC_NONE,
+    OVRTX_SEMANTIC_PATH_STRING,
+    OVRTX_SEMANTIC_TOKEN_STRING,
+    OVRTX_SEMANTIC_XFORM_MAT4x4,
+)
 from .dlpack import DLDataType, DLTensor, ManagedDLTensor
 
 if TYPE_CHECKING:
@@ -17,6 +31,56 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 _BindingTensorT = TypeVar("_BindingTensorT")
+
+
+class Semantic(IntEnum):
+    """Attribute semantic type for write, bind, and map operations.
+
+    Specifies the interpretation of attribute data. For write methods, the
+    semantic can often be omitted — the element type is inferred from the
+    input data. For bind/map methods, ``dtype``/``shape`` is the recommended
+    alternative for standard tensor types. Explicit semantics are required
+    for packed struct types which have no ``dtype``/``shape`` equivalent.
+    """
+
+    NONE = OVRTX_SEMANTIC_NONE
+    XFORM_MAT4x4 = OVRTX_SEMANTIC_XFORM_MAT4x4
+    PATH_STRING = OVRTX_SEMANTIC_PATH_STRING
+    TOKEN_STRING = OVRTX_SEMANTIC_TOKEN_STRING
+
+
+class PrimMode(IntEnum):
+    """Prim binding mode controlling how prim paths are resolved.
+
+    Values mirror the ``OVRTX_BINDING_PRIM_MODE_*`` constants from the C API.
+    """
+
+    EXISTING_ONLY = OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY
+    MUST_EXIST = OVRTX_BINDING_PRIM_MODE_MUST_EXIST
+    CREATE_NEW = OVRTX_BINDING_PRIM_MODE_CREATE_NEW
+
+
+class DataAccess(IntEnum):
+    """Data access mode for attribute write operations.
+
+    SYNC copies input data immediately so the caller's buffer can be reused.
+    ASYNC references the caller's buffer until the operation completes (zero-copy).
+
+    Values mirror the ``OVRTX_DATA_ACCESS_*`` constants from the C API.
+    """
+
+    ASYNC = OVRTX_DATA_ACCESS_ASYNC
+    SYNC = OVRTX_DATA_ACCESS_SYNC
+
+
+class Device(IntEnum):
+    """Device type for attribute mapping and render output mapping.
+
+    Values mirror the ``OVRTX_MAP_DEVICE_TYPE_*`` constants from the C API.
+    """
+
+    CPU = OVRTX_MAP_DEVICE_TYPE_CPU
+    CUDA = OVRTX_MAP_DEVICE_TYPE_CUDA
 
 
 class Operation(Generic[T]):
@@ -136,19 +200,19 @@ class _MappedRenderVar:
     on unmap for GPU pipelines.
 
     Usage:
-        with render_var.map(device="cuda") as mapping:
+        with render_var.map(device=Device.CUDA) as mapping:
             wp_image = wp.from_dlpack(mapping.tensor)
-            stream = wp.Stream(device=wp_image.device)
+            stream = wp_image.device.stream
             # ... GPU work on stream ...
             mapping.unmap(stream=stream.cuda_stream)  # Optional explicit sync
     """
 
-    def __init__(self, render_var: "RenderVarOutput", device: str = "cpu"):
+    def __init__(self, render_var: "RenderVarOutput", device: Device = Device.CPU):
         """Initialize context manager.
 
         Args:
-            render_var: Parent RenderVarOutput (must be already mapped)
-            device: Device type ("cpu" or "cuda")
+            render_var: Parent RenderVarOutput (must be already mapped).
+            device: Device type (Device.CPU or Device.CUDA).
         """
         self._render_var = render_var
         self._managed_tensor: Optional[ManagedDLTensor] = None
@@ -156,8 +220,8 @@ class _MappedRenderVar:
         self._unmapped = False
 
     @property
-    def device(self) -> str:
-        """Device type this output is mapped to ('cpu' or 'cuda')."""
+    def device(self) -> Device:
+        """Device type this output is mapped to."""
         return self._device
 
     @property
@@ -195,8 +259,7 @@ class _MappedRenderVar:
         if self._unmapped:
             return
 
-        # Validation: CUDA sync only for CUDA-mapped outputs
-        if self._device == "cpu" and (event is not None or stream is not None):
+        if self._device == Device.CPU and (event is not None or stream is not None):
             raise ValueError("CUDA sync parameters (event/stream) not applicable for CPU-mapped outputs")
 
         # Validation: event and stream are mutually exclusive
@@ -250,11 +313,11 @@ class RenderVarOutput(Generic[T]):
             np_array = np.from_dlpack(mapping.tensor)
 
         # Explicit CPU mapping
-        with render_var.map(device="cpu") as mapping:
+        with render_var.map(device=Device.CPU) as mapping:
             np_array = np.from_dlpack(mapping.tensor)
 
         # CUDA device mapping
-        with render_var.map(device="cuda") as mapping:
+        with render_var.map(device=Device.CUDA) as mapping:
             wp_array = wp.from_dlpack(mapping.tensor)
             wp.launch(my_kernel, inputs=[wp_array])
     """
@@ -272,46 +335,33 @@ class RenderVarOutput(Generic[T]):
         self._tensor: Optional[DLTensor] = None
         self._map_handle: Any = None
 
-    def map(self, device: str = "cpu", sync_stream: Optional[int] = None) -> "_MappedRenderVar":
+    def map(self, device: Device = Device.CPU, sync_stream: Optional[int] = None) -> "_MappedRenderVar":
         """Map render variable to device memory for access.
 
         Args:
-            device: Target device - "cpu" or "cuda" (case-insensitive).
-                   - "cpu": Map to host memory
-                   - "cuda": Map to CUDA device memory (linear buffer)
+            device: Target device (Device.CPU or Device.CUDA).
             sync_stream: CUDA stream handle for render completion sync. The provided stream
                 will wait for render to complete before any subsequent work executes.
                 Default: 1 for CUDA (default stream), 0 for CPU.
 
         Returns:
-            Context manager with tensor property and optional unmap() for CUDA sync
+            Context manager with tensor property and optional unmap() for CUDA sync.
 
         Raises:
-            RuntimeError: If mapping fails or already mapped
-            ValueError: If device parameter is invalid
+            RuntimeError: If mapping fails or already mapped.
 
         Note:
             The buffer is ready for immediate use when map() returns. The buffer
             remains valid until the context manager exits or unmap() is called.
         """
-        from .bindings import OVRTX_MAP_DEVICE_TYPE_CPU, OVRTX_MAP_DEVICE_TYPE_CUDA
-
-        if (device_lower := device.strip().lower()) == "cuda":
-            device_type = OVRTX_MAP_DEVICE_TYPE_CUDA
-        elif not device or device_lower == "cpu":
-            device_type = OVRTX_MAP_DEVICE_TYPE_CPU
-        else:
-            raise ValueError(f"Unsupported device: {device}")
-
         if self._tensor is not None:
             raise RuntimeError(f"Render var '{self.name}' already mapped")
 
         self._tensor, self._map_handle = self._renderer._map_output(
-            self.handle, device_type=device_type, sync_stream=sync_stream
+            self.handle, device_type=device, sync_stream=sync_stream
         )
 
-        # Return context manager wrapper with device for validation
-        return _MappedRenderVar(self, device=device_lower)
+        return _MappedRenderVar(self, device=device)
 
     def release(self) -> None:
         """Release mapped resources.
@@ -604,37 +654,46 @@ class RendererResult(Generic[T]):
 class AttributeBinding(Generic[_BindingTensorT]):
     """Persistent attribute binding for efficient repeated writes or maps.
 
-    Created by Renderer.bind_attribute() or Renderer.bind_array_attribute().
-    Reuse for multiple write operations to avoid recreating the binding descriptor.
+    Created by ``Renderer.bind_attribute()`` or
+    ``Renderer.bind_array_attribute()``. Reuse for multiple write operations
+    to avoid recreating the binding descriptor.
 
-    The type parameter indicates the expected data type for write():
-    - AttributeBinding[DLTensor]: scalar attributes (one value per prim)
-    - AttributeBinding[list[DLTensor]]: array attributes (variable-length per prim)
+    ``write()`` accepts NumPy arrays, Warp arrays, or any
+    ``__dlpack__``-compatible object. For string bindings, pass ``list[str]``
+    (scalar) or ``list[list[str]]`` (array).
 
     Example (scalar):
         ```python
+        import numpy as np
+
         binding = renderer.bind_attribute(
-            prim_paths=["/World/Cube"],
-            attribute_name="xformOp:transform",
-            semantic="transform_4x4"
-        )
-        binding.write(frame1.to_dltensor())
-        binding.write(frame2.to_dltensor())
+            ["/World/Cube"], "xformOp:transform",
+            dtype="float64", shape=(4, 4))
+        binding.write(np.eye(4, dtype=np.float64).reshape(1, 4, 4))
         binding.unbind()
         ```
 
     Example (array):
         ```python
+        import numpy as np
+
         binding = renderer.bind_array_attribute(
-            prim_paths=["/World/Mesh1", "/World/Mesh2"],
-            attribute_name="faceVertexCounts"
-        )
-        binding.write([counts1, counts2])  # List of tensors, one per prim
+            ["/World/Mesh1", "/World/Mesh2"], "faceVertexCounts",
+            dtype="int32")
+        binding.write([np.array([4, 4], dtype=np.int32), np.array([3, 3, 3], dtype=np.int32)])
         binding.unbind()
         ```
     """
 
-    def __init__(self, handle: int, semantic: int, dtype: DLDataType, renderer: "Renderer", is_array: bool = False):
+    def __init__(
+        self,
+        handle: int,
+        semantic: int,
+        dtype: DLDataType,
+        renderer: "Renderer",
+        is_array: bool = False,
+        shape: "Optional[tuple]" = None,
+    ):
         """Initialize attribute binding (internal use - created by Renderer.bind_attribute).
 
         Args:
@@ -643,6 +702,7 @@ class AttributeBinding(Generic[_BindingTensorT]):
             dtype: Expected DLDataType for tensors used with this binding
             renderer: Renderer instance that created this binding
             is_array: True if this binding is for array attributes
+            shape: Optional element shape from the dtype/shape API, stored for map output reshaping
         """
         import weakref
 
@@ -651,6 +711,7 @@ class AttributeBinding(Generic[_BindingTensorT]):
         self._dtype = dtype
         self._renderer = weakref.ref(renderer)
         self._is_array = is_array
+        self._shape = shape
 
     def _get_renderer(self) -> "Renderer":
         """Get renderer, raising if it has been destroyed."""
@@ -679,45 +740,91 @@ class AttributeBinding(Generic[_BindingTensorT]):
         """True if this binding is for array attributes."""
         return self._is_array
 
-    def write(self, data: _BindingTensorT, dirty_bits: Optional[bytes] = None) -> None:
+    @property
+    def shape(self) -> "Optional[tuple]":
+        """Element shape from the dtype/shape API, or None if not specified."""
+        return self._shape
+
+    def write(
+        self,
+        data: _BindingTensorT,
+        dirty_bits: Optional[bytes] = None,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
+    ) -> None:
         """Write attribute data using this binding (synchronous).
 
         Args:
-            data: Data to write. For scalar bindings (bind_attribute): a single DLTensor.
-                For array bindings (bind_array_attribute): a list of DLTensor, one per prim.
+            data: Data to write. Accepts NumPy arrays, Warp arrays, or any
+                ``__dlpack__``-compatible object. For scalar bindings
+                (``bind_attribute``): a single tensor. For array bindings
+                (``bind_array_attribute``): a list of tensors, one per prim.
+                For string bindings: a ``list[str]`` (scalar) or
+                ``list[list[str]]`` (array).
             dirty_bits: Optional dirty bit array for selective updates.
+            data_access: Data access mode. ``DataAccess.SYNC`` (default) copies
+                input data immediately so the caller's buffer can be reused
+                after this call returns. ``DataAccess.ASYNC`` references the
+                caller's buffer until the operation completes (zero-copy). Not
+                allowed with string bindings.
+            cuda_stream: CUDA stream handle (``int``) for GPU synchronization.
+            cuda_event: CUDA event handle (``int``) for GPU synchronization.
         """
         tensors = data if self._is_array else [data]
-        self._get_renderer()._write_attribute_by_binding(self, tensors, dirty_bits)
+        self._get_renderer()._write_attribute_by_binding(
+            self,
+            tensors,
+            dirty_bits,
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
+        )
 
     def write_async(
-        self, data: _BindingTensorT, dirty_bits: Optional[bytes] = None, data_access: str = "sync"
+        self,
+        data: _BindingTensorT,
+        dirty_bits: Optional[bytes] = None,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> "Operation[None]":
         """Write attribute data using this binding (asynchronous).
 
         Args:
-            data: Data to write. For scalar bindings (bind_attribute): a single DLTensor.
-                For array bindings (bind_array_attribute): a list of DLTensor, one per prim.
+            data: Data to write. Accepts NumPy arrays, Warp arrays, or any
+                ``__dlpack__``-compatible object. For scalar bindings
+                (``bind_attribute``): a single tensor. For array bindings
+                (``bind_array_attribute``): a list of tensors, one per prim.
+                For string bindings: a ``list[str]`` (scalar) or
+                ``list[list[str]]`` (array).
             dirty_bits: Optional dirty bit array for selective updates.
-            data_access: Data access mode ("sync" or "async").
+            data_access: Data access mode. ``DataAccess.SYNC`` (default) copies
+                input data immediately; ``DataAccess.ASYNC`` references the
+                caller's buffer until the operation completes (zero-copy). Not
+                allowed with string bindings.
+            cuda_stream: Optional CUDA stream handle (int) for GPU sync.
+            cuda_event: Optional CUDA event handle (int) for GPU sync.
 
         Returns:
             Operation for async control (yields None on completion).
         """
         tensors = data if self._is_array else [data]
-        return self._get_renderer()._write_attribute_by_binding_async(self, tensors, dirty_bits, data_access)
+        return self._get_renderer()._write_attribute_by_binding_async(
+            self, tensors, dirty_bits, data_access=data_access, cuda_stream=cuda_stream, cuda_event=cuda_event
+        )
 
-    def map(self, device: str = "cpu", device_id: int = 0) -> "AttributeMapping":
+    def map(self, device: Device = Device.CPU, device_id: int = 0) -> "AttributeMapping":
         """Map attribute buffer for direct memory access using this binding.
 
         Convenience wrapper: delegates to Renderer._map_attribute_by_binding().
 
         Args:
-            device: Device type ("cpu" or "cuda")
-            device_id: Device ID (default 0)
+            device: Device type (Device.CPU or Device.CUDA).
+            device_id: Device ID (default 0).
 
         Returns:
-            AttributeMapping for direct buffer access
+            AttributeMapping for direct buffer access.
         """
         return self._get_renderer()._map_attribute_by_binding(self, device, device_id)
 
@@ -751,32 +858,30 @@ class AttributeBinding(Generic[_BindingTensorT]):
 class AttributeMapping:
     """High-level wrapper for mapped attribute buffer.
 
-    Provides DLPack-compatible access to RTX-internal buffer for zero-copy writes.
-    The buffer is valid until unmap() is called.
+    Provides access to an internal buffer for direct writes using NumPy, Warp,
+    or any ``__dlpack__``-compatible library. The buffer is valid until
+    ``unmap()`` is called.
 
     Usage:
         ```python
-        # Map attribute - creates handle and buffer
-        mapping = renderer.map_attribute(
-            prim_paths=["/World/Cube"],
-            attribute_name="omni:fabric:worldMatrix",
-            dtype=dtype,
-            semantic="transform_4x4"
-        )
+        import numpy as np
 
-        # Write data via DLPack-compatible framework (zero-copy)
-        array = framework.from_dlpack(mapping.tensor)
+        mapping = renderer.map_attribute(
+            ["/World/Cube"], "xformOp:transform",
+            dtype=np.float64, shape=(4, 4))
+
+        # Write data via NumPy, Warp, etc.
+        array = np.from_dlpack(mapping.tensor)
         array[:] = source_matrix_data
 
-        # Unmap to apply data and destroy mapping
+        # Unmap to apply changes
         renderer.unmap_attribute(mapping)
         ```
 
     Or use as context manager:
         ```python
         with renderer.map_attribute(...) as mapping:
-            array = framework.from_dlpack(mapping.tensor)
-            array[:] = source_data
+            np.from_dlpack(mapping.tensor)[:] = source_data
         # Automatically unmapped on exit
         ```
     """
@@ -785,18 +890,18 @@ class AttributeMapping:
         self,
         mapping: Any,  # ovrtx_attribute_mapping_t from C API
         renderer: "Renderer",
-        dltensor: DLTensor,  # Semantic-aware (might be reshaped) DLTensor view (provided by renderer)
+        dltensor: DLTensor,  # Reshaped DLTensor view (provided by renderer)
         binding_desc: Optional[Any] = None,  # Optional ovrtx_binding_desc_t for write_attribute
-        device: str = "cpu",  # Device type for validation ("cpu" or "cuda")
+        device: Device = Device.CPU,
     ):
         """Initialize attribute mapping (internal use - created by Renderer.map_attribute).
 
         Args:
-            mapping: C structure ovrtx_attribute_mapping_t containing map_handle and DLTensor
-            renderer: Renderer instance (needed for unmap)
-            dltensor: Semantic-aware (might be reshaped) DLTensor view (provided by renderer)
-            binding_desc: Optional binding descriptor (for write_attribute calls)
-            device: Device type for validation ("cpu" or "cuda")
+            mapping: C structure ovrtx_attribute_mapping_t containing map_handle and tensor data.
+            renderer: Renderer instance (needed for unmap).
+            dltensor: Reshaped tensor view (provided by renderer, shaped per dtype/shape).
+            binding_desc: Optional binding descriptor (for write_attribute calls).
+            device: Device type (Device.CPU or Device.CUDA).
         """
         self._mapping = mapping
         self._renderer = renderer
@@ -808,16 +913,18 @@ class AttributeMapping:
 
     @property
     def tensor(self) -> ManagedDLTensor:
-        """Get ManagedDLTensor for DLPack interop (NumPy, Warp, PyTorch, etc.).
+        """Access the mapped buffer as a tensor for NumPy, Warp, etc.
 
-        Returns a semantic-aware view optimized for NumPy users:
-        - Matrix4d (TRANSFORM_4x4): Reshaped to (4, 4) for direct matrix operations
-        - RGBA images (COLOR_RGBA4b): Shape (H, W, 4) - standard image format
-        - RGB images (COLOR_RGB3f): Shape (H, W, 3) - standard image format
-        - Other types: Standard DLPack expansion
+        When the mapping was created with ``shape=``, the tensor dimensions
+        match ``(N, *shape)`` with a scalar element dtype. For
+        ``Semantic.XFORM_MAT4x4`` bindings, the tensor is reshaped to
+        ``(N, 4, 4)`` for direct matrix operations.
+
+        Use ``np.from_dlpack(mapping.tensor)`` or equivalent to obtain a
+        writable array view.
 
         Returns:
-            ManagedDLTensor with semantic-aware shape optimization
+            ManagedDLTensor ready for consumption by array libraries.
 
         Raises:
             RuntimeError: If accessed after unmap().
@@ -850,12 +957,8 @@ class AttributeMapping:
         return self._binding_desc
 
     @property
-    def device(self) -> str:
-        """Get the device type this attribute is mapped to.
-
-        Returns:
-            Device type string ("cpu" or "cuda")
-        """
+    def device(self) -> Device:
+        """Get the device type this attribute is mapped to."""
         return self._device
 
     def unmap(self, event: Optional[int] = None, stream: Optional[int] = None) -> None:
@@ -880,11 +983,12 @@ class AttributeMapping:
 
         Example:
             ```python
-            with renderer.map_attribute(..., device="cuda") as mapping:
-                stream = wp.Stream()
+            from ovrtx import Device
+
+            with renderer.map_attribute(..., device=Device.CUDA) as mapping:
                 wp_array = wp.from_dlpack(mapping.tensor)
+                stream = wp_array.device.stream
                 wp.launch(kernel=my_kernel, inputs=[wp_array], stream=stream)
-                # Unmap with stream sync - C library waits for stream before consuming data
                 mapping.unmap(stream=stream.cuda_stream)
             ```
         """
@@ -909,11 +1013,28 @@ class AttributeMapping:
 
 @dataclass
 class RendererConfig:
-    "ovrtx configuration with automatic defaults."
+    """ovrtx renderer configuration."""
 
-    #: Enables synchronous rendering mode for debugging purposes. 
     sync_mode: Optional[bool] = None
-    #: Set the path to the log file for logging output.
+    """Enables synchronous rendering mode for debugging purposes."""
+
     log_file_path: Optional[str] = None
-    #: Set the log level for logging output: "verbose", "info", "warn", "error"
+    """Set the path to the log file for logging output."""
+
     log_level: Optional[str] = None
+    """Set the log level for logging output: "verbose", "info", "warn", "error"."""
+
+    enable_profiling: Optional[bool] = None
+    """Enable internal profiling. Adds overhead when enabled."""
+
+    read_gpu_transforms: Optional[bool] = None
+    """Use GPU world transform propagation during rendering."""
+
+    output_partial_frames: Optional[bool] = None
+    """Output partial frames for incremental sensors. When disabled, only full frames are returned."""
+
+    keep_system_alive: Optional[bool] = None
+    """Keep the renderer system alive after all instances are destroyed so the next create reuses it."""
+
+    active_cuda_gpus: Optional[str] = None
+    """Comma-separated CUDA device indices to use for rendering (e.g., "0,1,2")."""

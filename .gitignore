@@ -1,5 +1,7 @@
 ﻿# All folders starting with _ are local.
 _*/
+# But keep the Sphinx extensions directory.
+!docs/_ext/
 
 # Compiled python files.
 *.py[cod]

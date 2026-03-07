@@ -42,9 +42,17 @@
 
 // Result of acquire_next_image operation
 enum class AcquireResult {
-    Success,    // Image acquired successfully
-    OutOfDate,  // Swapchain needs recreation (resize, etc.)
-    Minimized   // Window is minimized (0x0 size)
+    Success,     // Image acquired successfully
+    Suboptimal,  // Image acquired, but swapchain should be recreated soon
+    OutOfDate,   // Swapchain needs immediate recreation (resize, etc.)
+    Minimized    // Window is minimized (0x0 size)
+};
+
+// Result of submit_and_present operation
+enum class PresentResult {
+    Success,
+    Suboptimal,
+    OutOfDate
 };
 
 // Debug message severity levels
@@ -95,9 +103,13 @@ public:
     // Render loop helpers
     auto record_frame_begin(uint32_t image_index) -> void;
     auto record_frame_end(uint32_t image_index) -> void;
-    auto submit_and_present(uint32_t image_index) -> void;
+    // Submit draw work and present while waiting for CUDA producer progress.
+    // cuda_timeline_wait_value is the frame value signaled by CUDA after it
+    // finished writing the shared image Vulkan will sample this frame.
+    auto submit_and_present(uint32_t image_index, uint64_t cuda_timeline_wait_value = 0) -> PresentResult;
     
-    // CUDA interop exports
+    // CUDA interop exports. Callers pass these OS handles to CUDA so both APIs
+    // reference the same memory/semaphore objects.
 #ifdef _WIN32
     auto export_memory_handle(SampledImageHandle handle) -> void*;
     auto export_timeline_semaphore_handle() -> void*;
@@ -143,6 +155,7 @@ public:
     auto device() const -> VkDevice { return _device; }
     auto graphics_queue() const -> VkQueue { return _graphics_queue; }
     auto is_headless() const -> bool { return _headless; }
+    auto queue_family() const -> uint32_t { return _graphics_queue_family; }
     auto pipeline_layout() const -> VkPipelineLayout { return _pipeline_layout; }
     auto descriptor_set() const -> VkDescriptorSet { return _descriptor_set; }
     

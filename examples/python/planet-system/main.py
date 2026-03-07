@@ -31,9 +31,9 @@ import argparse
 import math
 from pathlib import Path
 
-import numpy as np
 import warp as wp
-from ovrtx import Renderer, RendererConfig
+
+from ovrtx import Device, PrimMode, Renderer, RendererConfig
 
 # Script directory for output
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -133,15 +133,15 @@ def compute_system_transforms(
         transforms[tid] = make_y_rotation_transform(spin_angle, x, _0, z)
 
 
-def run_animation(device: str, num_planets: int, save_png: bool, enable_log: bool, rr) -> None:
+def run_animation(device: Device, num_planets: int, save_png: bool, enable_log: bool, rr) -> None:
     """Run the planetary system animation.
 
     Args:
-        device: "cpu" or "cuda"
+        device: Device.CPU or Device.CUDA
         num_planets: Number of planets to animate (1-1000)
         save_png: Save rendered frames as PNGs
-        rr: rerun module (already initialized) or None to skip streaming
         enable_log: Enable carb log file
+        rr: rerun module (already initialized) or None to skip streaming
     """
     # Computed constants
     num_transforms = num_planets + 1  # orbit (index 0) + planets
@@ -166,10 +166,12 @@ def run_animation(device: str, num_planets: int, save_png: bool, enable_log: boo
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         from PIL import Image
 
-    config = RendererConfig()
+    # Build renderer config
+    log_path = str(OUTPUT_DIR / "anim_planet_system.log") if enable_log else None
+    config = RendererConfig(log_file_path=log_path)
     renderer = Renderer(config)
 
-    print(f"Device: {device.upper()}")
+    print(f"Device: {device.name}")
     print(f"USD scene: {USD_SCENE}")
     print(f"Simulation: {NUM_SIM_STEPS} steps @ {SIM_HZ} Hz ({SIM_DURATION}s)")
     print(f"Animation: {num_planets} planets, orbit={orbit_radius}, scale={planet_scale:.1f}")
@@ -185,9 +187,10 @@ def run_animation(device: str, num_planets: int, save_png: bool, enable_log: boo
     all_prim_paths = ["/World/Cube/Orbit"] + [f"/World/Cube/Orbit/Planet_{i}" for i in range(num_planets)]
     system_binding = renderer.bind_attribute(
         prim_paths=all_prim_paths,
-        attribute_name="omni:fabric:localMatrix",
-        semantic="transform_4x4",
-        prim_mode="must_exist",
+        attribute_name="omni:xform",
+        dtype="float64",
+        shape=(4, 4),
+        prim_mode=PrimMode.MUST_EXIST,
     )
 
     # 4. Animation loop - simulation at 100 Hz, renderer produces at 60 fps
@@ -200,7 +203,7 @@ def run_animation(device: str, num_planets: int, save_png: bool, enable_log: boo
         # Map, compute transforms, unmap (writes back to renderer scene)
         with system_binding.map(device=device, device_id=0) as attr_mapping:
             wp_transforms = wp.from_dlpack(attr_mapping.tensor, dtype=wp.mat44d)
-            if cuda_stream is None and device == "cuda":
+            if cuda_stream is None and device == Device.CUDA:
                 cuda_stream = wp.Stream(device=wp_transforms.device)
 
             wp.launch(
@@ -250,12 +253,12 @@ def run_animation(device: str, num_planets: int, save_png: bool, enable_log: boo
     # 6. Save final state via debug dump
     products = renderer.step(render_products={"ovrtx_debug_dump_stage"}, delta_time=0.0)
     frame = products["ovrtx_debug_dump_stage"].frames[0]
-    with frame.render_vars["debug"].map(device="cpu") as mapping:
+    with frame.render_vars["debug"].map(device=Device.CPU) as mapping:
         dump = mapping.tensor.to_bytes().decode("utf-8")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         (OUTPUT_DIR / f"planetary_system_final.usda").write_text(dump, encoding="utf-8")
 
-    print(f"Animated {num_planets} planets on {device.upper()}: {NUM_SIM_STEPS} sim steps @ {SIM_HZ} Hz")
+    print(f"✓ Animated {num_planets} planets on {device.name}: {NUM_SIM_STEPS} sim steps @ {SIM_HZ} Hz")
     if save_png:
         print(f"  Frames saved to: {OUTPUT_DIR}")
 
@@ -300,7 +303,7 @@ To create a video from frames:
 
     wp.init()
     run_animation(
-        device="cuda" if args.gpu else "cpu",
+        device=Device.CUDA if args.gpu else Device.CPU,
         num_planets=num_planets,
         save_png=args.png,
         enable_log=args.log,
@@ -310,3 +313,4 @@ To create a video from frames:
 
 if __name__ == "__main__":
     main()
+

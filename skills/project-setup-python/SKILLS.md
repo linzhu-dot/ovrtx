@@ -87,36 +87,13 @@ pip install ovrtx
 
 ## Minimal main.py
 
-```python
-import ovrtx
-from PIL import Image
-
-
-def main():
-    # Create the renderer
-    renderer = ovrtx.Renderer()
-
-    # Load a USD scene
-    renderer.add_usd("https://omniverse-content-production.s3.us-west-2.amazonaws.com/Samples/Robot-OVRTX/robot-ovrtx.usda")
-
-    # Step the renderer to produce a frame
-    products = renderer.step(
-        render_products={"/Render/Camera"},
-        delta_time=1.0 / 60,
-    )
-
-    # Read the rendered image and save it
-    for _name, product in products.items():
-        for frame in product.frames:
-            with frame.render_vars["LdrColor"].map(device="cpu") as var:
-                pixels = var.tensor.numpy()
-                Image.fromarray(pixels).save("output.png")
-                print(f"Saved output.png ({pixels.shape[1]}x{pixels.shape[0]})")
-
-
-if __name__ == "__main__":
-    main()
-```
+> **Source:** `examples/python/minimal/main.py` snippet `create-renderer`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `add-usd`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `step`
+>
+> Followed by: `examples/python/minimal/main.py` snippet `read-render-output`
 
 ### Run
 

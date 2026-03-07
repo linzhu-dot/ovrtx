@@ -26,134 +26,33 @@ The pattern is: **map -> write into tensor -> unmap**.
 
 ### CPU mapping with NumPy
 
-```python
-import numpy as np
-
-mapping = renderer.map_attribute(
-    prim_paths=["/World/Cube"],
-    attribute_name="omni:fabric:localMatrix",
-    semantic="transform_4x4",
-    device="cpu",
-)
-
-# Write directly into the mapped buffer
-array = np.from_dlpack(mapping.tensor)  # shape: (1, 4, 4) for 1 prim
-array[0] = np.eye(4)
-
-# Apply and release
-renderer.unmap_attribute(mapping)
-```
+> **Source:** `tests/test_ovrtx.py` snippet `map-attribute-cpu`
 
 ### Context manager (recommended)
 
-```python
-with renderer.map_attribute(
-    prim_paths=["/World/Cube"],
-    attribute_name="omni:fabric:localMatrix",
-    semantic="transform_4x4",
-) as mapping:
-    np.from_dlpack(mapping.tensor)[0] = np.eye(4)
-# Automatically unmapped on exit
-```
+> **Source:** `tests/test_ovrtx.py` snippet `map-attribute-cpu`
 
 ### GPU mapping with Warp
 
 From the planet-system example -- map on CUDA, compute with a Warp kernel, unmap with stream sync:
 
-```python
-import warp as wp
-
-with binding.map(device="cuda", device_id=0) as attr_mapping:
-    wp_transforms = wp.from_dlpack(attr_mapping.tensor, dtype=wp.mat44d)
-
-    wp.launch(
-        kernel=compute_transforms,
-        dim=num_prims,
-        inputs=[wp_transforms, wp.float64(sim_time)],
-        device=wp_transforms.device,
-    )
-
-    # Sync: tell ovrtx to wait for this stream before reading the data
-    attr_mapping.unmap(stream=cuda_stream.cuda_stream)
-```
+> **Source:** `tests/test_ovrtx.py` snippet `unmap-attribute-cuda-sync`
 
 ### Using a persistent binding for mapping
 
 More efficient for repeated map/unmap cycles (avoids recreating the binding descriptor):
 
-```python
-binding = renderer.bind_attribute(
-    prim_paths=prim_paths,
-    attribute_name="omni:fabric:localMatrix",
-    semantic="transform_4x4",
-    prim_mode="must_exist",
-)
-
-for frame in range(num_frames):
-    with binding.map(device="cpu") as mapping:
-        array = np.from_dlpack(mapping.tensor)
-        array[:] = frame_transforms[frame]
-
-    renderer.step(render_products={"/Render/Camera"}, delta_time=dt)
-
-binding.unbind()
-```
+> **Source:** `tests/test_ovrtx.py` snippet `map-binding-cpu`
 
 ## C
 
 ### Map, write, unmap
 
-```c
-ovrtx_mapping_desc_t mapping_desc = {};
-mapping_desc.device_type = 1;  // kDLCPU
-mapping_desc.device_id = 0;
-
-// Build the binding descriptor (or use a persistent binding handle,
-// see attribute-bindings skill)
-ovx_string_t paths[] = { {"/World/Cube", strlen("/World/Cube")} };
-DLDataType type = { kDLFloat, 64, 16 };  // 16 doubles per element
-
-ovrtx_binding_desc_or_handle_t binding = {};
-binding.binding_desc.prim_list = { paths, 1 };
-binding.binding_desc.attribute_name = { {}, {
-    "omni:fabric:localMatrix", strlen("omni:fabric:localMatrix") } };
-binding.binding_desc.attribute_type = { type, false, OVRTX_SEMANTIC_TRANSFORM_4x4 };
-
-ovrtx_attribute_mapping_t out_mapping = {};
-ovrtx_result_t result = ovrtx_map_attribute(
-    renderer, &binding, mapping_desc, &out_mapping);
-
-// Write into out_mapping.dl (DLTensor)
-double* data = (double*)out_mapping.dl.data;
-// ... write transform data ...
-
-// Unmap to apply
-ovrtx_cuda_sync_t no_sync = {};
-ovrtx_unmap_attribute(renderer, out_mapping.map_handle, no_sync);
-```
+> **Source:** `examples/c/vulkan-interop/src/main.cpp` snippet `write-camera-transform`
 
 ### GPU mapping with CUDA sync
 
-```c
-ovrtx_mapping_desc_t mapping_desc = {};
-mapping_desc.device_type = 2;  // kDLCUDA
-mapping_desc.device_id = 0;
-
-ovrtx_attribute_mapping_t out_mapping = {};
-ovrtx_result_t result = ovrtx_map_attribute(
-    renderer, &binding, mapping_desc, &out_mapping);
-
-// Launch CUDA kernel to write into out_mapping.dl.data on cuda_stream
-// ...
-
-// Signal event when kernel is done
-cuEventRecord(write_done_event, cuda_stream);
-
-// Unmap with sync -- ovrtx waits for the event before reading the data
-ovrtx_cuda_sync_t sync = {};
-sync.wait_event = (uintptr_t)write_done_event;
-ovrtx_unmap_attribute(renderer, out_mapping.map_handle, sync);
-```
+> **Source:** `examples/c/vulkan-interop/src/main.cpp` snippet `map-rendered-output-cuda-array`
 
 ## Key Types / Functions
 
@@ -165,14 +64,15 @@ ovrtx_unmap_attribute(renderer, out_mapping.map_handle, sync);
 | `mapping.tensor` | `out_mapping.dl` (DLTensor) |
 | `mapping.unmap(stream=...)` | `ovrtx_unmap_attribute` with `cuda_sync.stream` |
 | `mapping.unmap(event=...)` | `ovrtx_unmap_attribute` with `cuda_sync.wait_event` |
+| `renderer.unmap_attribute_async(mapping, ...)` | `ovrtx_unmap_attribute` (always async in C) |
 
 Semantic-aware tensor shapes in Python:
-- `TRANSFORM_4x4`: reshaped to (N, 4, 4) for NumPy-friendly matrix operations
-- `COLOR_RGBA4b`: reshaped to (N, 4) for RGBA channels
-- `COLOR_RGB3f`: reshaped to (N, 3) for RGB channels
+- When using `dtype`/`shape` (preferred for interop), the tensor has shape `(N, *shape)` — e.g. `(N, 4, 4)` for `dtype="float64", shape=(4, 4)`.
+- The `semantic=` path also reshapes automatically: `Semantic.XFORM_MAT4x4` → `(N, 4, 4)`, points → `(N, 3)`, colors → `(N, 4)` for RGBA or `(N, 3)` for RGB.
 
 ## Common Pitfalls
 
+- The canonical transform attribute name is `"omni:xform"`. The legacy name `"omni:fabric:localMatrix"` (used in examples above) is also accepted. New code should prefer `"omni:xform"`.
 - Array attributes (e.g., `float3[] points`) are **not supported** for mapping because they have variable lengths per prim. Use `write_array_attribute()` instead.
 - Data must be fully written before calling `unmap()`. For CUDA, pass `stream` or `event` so ovrtx knows when the GPU write is complete.
 - `event` and `stream` are mutually exclusive on unmap -- use one or the other.

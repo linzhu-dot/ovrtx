@@ -28,6 +28,10 @@ public:
     
     // End recording commands
     auto end() -> void;
+
+    // Dynamic rendering
+    auto begin_rendering(VkRenderingInfo const& rendering_info) -> void;
+    auto end_rendering() -> void;
     
     // Query pool operations
     auto reset_query_pool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) -> void;
@@ -36,7 +40,9 @@ public:
     // Synchronization (Vulkan 1.3)
     auto image_memory_barrier(VkImage image, VkImageAspectFlags aspect_mask,
                               VkImageLayout old_layout, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
-                              VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) -> void;
+                              VkImageLayout new_layout, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access,
+                              uint32_t src_queue_family = VK_QUEUE_FAMILY_IGNORED,
+                              uint32_t dst_queue_family = VK_QUEUE_FAMILY_IGNORED) -> void;
     
     // Dynamic state - viewport/scissor
     auto set_viewport(float x, float y, float width, float height, float min_depth = 0.0f, float max_depth = 1.0f) -> void;

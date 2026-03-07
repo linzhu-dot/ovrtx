@@ -30,133 +30,75 @@ Multiple USD inputs can be composed together using `path_prefix` to place them a
 
 ### Load from file or URL
 
-```python
-renderer.add_usd("https://example.com/scene.usda")
-# or a local file
-renderer.add_usd("/path/to/scene.usda")
-```
+> **Source:** `examples/python/minimal/main.py` snippet `add-usd`
 
 ### Load with a path prefix
 
-```python
-renderer.add_usd("/path/to/robot.usda", path_prefix="/World/Robot")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `add-usd-layer`
 
 ### Inject inline USDA content
 
 Useful for creating RenderProducts, cameras, or runtime geometry without editing the original scene:
 
-```python
-renderer.add_usd_layer('''
-#usda 1.0
-(defaultPrim = "Render")
-def Scope "Render" {
-    def RenderProduct "Camera" {
-        rel camera = </World/Camera>
-    }
-}
-''', path_prefix="/Render")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `add-usd-layer`
 
 ### Compose multiple inputs
 
-```python
-# Load base scene
-renderer.add_usd("scene.usda")
-
-# Add planets under /World/Cube/Orbit
-orbit_usda = generate_orbit_layer_usda(num_planets=36)
-renderer.add_usd_layer(orbit_usda, path_prefix="/World/Cube/Orbit")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `add-usd-layer`
+>
+> See also the planet-system example for composing multiple inputs.
 
 ### Remove USD
 
-```python
-handle = renderer.add_usd("scene.usda")
-# later...
-renderer.remove_usd(handle)
-```
+> **Source:** `tests/test_ovrtx.py` snippet `remove-usd`
 
 ## C
 
 ### Load from file or URL
 
-```c
-ovrtx_usd_handle_t usd_handle = 0;
-ovrtx_usd_input_t usd_input = {};
-char const* url = "https://example.com/scene.usda";
-usd_input.usd_file_path = {url, strlen(url)};
-
-ovrtx_enqueue_result_t enqueue_result =
-    ovrtx_add_usd(renderer, usd_input, {"", 0}, &usd_handle);
-
-if (enqueue_result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "add_usd enqueue failed: %.*s\n", (int)error.length, error.ptr);
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
 
 ### Poll for completion
 
 Loading is asynchronous in C. Poll until done:
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, enqueue_result.op_index, ovrtx_timeout_t{0}, &wait_result);
-THROW_ON_ERROR(result, "wait_op");
-
-// Poll with zero timeout -- returns OVRTX_API_TIMEOUT while still loading
-while (ovrtx_wait_op(renderer, enqueue_result.op_index, ovrtx_timeout_t{0},
-                     &wait_result).status == OVRTX_API_TIMEOUT) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
 
 Or block indefinitely:
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, enqueue_result.op_index, ovrtx_timeout_infinite, &wait_result);
-
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "wait_op failed: %.*s\n", (int)error.length, error.ptr);
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `step-renderer`
+>
+> The step snippet demonstrates blocking with `ovrtx_timeout_infinite`.
 
 ### Load with a path prefix
 
-```c
-ovrtx_enqueue_result_t enqueue_result =
-    ovrtx_add_usd(renderer, usd_input, {"/World/Robot", strlen("/World/Robot")}, &usd_handle);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Pass a non-empty path prefix as the third argument to `ovrtx_add_usd`.
 
 ### Inject inline USDA content
 
-```c
-ovrtx_usd_input_t layer_input = {};
-char const* usda =
-    "#usda 1.0\n"
-    "(defaultPrim = \"Render\")\n"
-    "def Scope \"Render\" {\n"
-    "    def RenderProduct \"Camera\" {\n"
-    "        rel camera = </World/Camera>\n"
-    "    }\n"
-    "}\n";
-layer_input.usd_layer_content = {usda, strlen(usda)};
-
-ovrtx_usd_handle_t layer_handle = 0;
-ovrtx_enqueue_result_t result =
-    ovrtx_add_usd(renderer, layer_input, {"/Render", strlen("/Render")}, &layer_handle);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Set `usd_input.usd_layer_content` instead of `usd_input.usd_file_path` for inline USDA content.
 
 ### Remove USD
 
-```c
-ovrtx_enqueue_result_t result = ovrtx_remove_usd(renderer, usd_handle);
-```
+> **Source:** `tests/test_ovrtx.py` snippet `remove-usd` (Python equivalent)
+>
+> C: `ovrtx_enqueue_result_t result = ovrtx_remove_usd(renderer, usd_handle);`
+
+### Update time-sampled attributes
+
+For animated USD scenes, update all time-sampled attributes to a specific USD time:
+
+> **Source:** `tests/test_ovrtx.py` snippet `update-from-usd-time`
+
+### Reset stage to empty
+
+Clear all USD content from the runtime stage:
+
+> **Source:** `tests/test_ovrtx.py` snippet `reset-stage`
 
 ## Key Types / Functions
 
@@ -166,6 +108,8 @@ ovrtx_enqueue_result_t result = ovrtx_remove_usd(renderer, usd_handle);
 | `renderer.add_usd_layer(usda, prefix)` | same, but set `usd_input.usd_layer_content` |
 | `renderer.remove_usd(handle)` | `ovrtx_remove_usd(renderer, handle)` |
 | `renderer.add_usd_async(...)` | `ovrtx_add_usd()` returns immediately; poll with `ovrtx_wait_op` |
+| `renderer.update_from_usd_time(usd_time)` | `ovrtx_update_stage_from_usd_time(renderer, usd_time)` |
+| `renderer.reset_stage()` / `reset_stage_async()` | `ovrtx_reset_stage(renderer)` |
 
 C input struct (`ovrtx_usd_input_t`) -- set exactly one field:
 - `usd_file_path` -- file path or URL

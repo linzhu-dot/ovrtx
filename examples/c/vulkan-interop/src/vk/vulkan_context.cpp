@@ -209,9 +209,15 @@ auto VulkanContext::acquire_next_image(uint32_t& image_index) -> AcquireResult {
                           _image_available_semaphore, VK_NULL_HANDLE, &image_index);
     _current_image_index = image_index;
     
-    // If swapchain is out of date (e.g., window resized), signal caller to recreate
-    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR || acquire_result == VK_SUBOPTIMAL_KHR) {
+    // Out of date: image was NOT acquired, semaphore was NOT signaled.
+    // Caller must recreate the swapchain before the next acquire.
+    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
         return AcquireResult::OutOfDate;
+    }
+    // Suboptimal: image WAS acquired and semaphore WAS signaled.
+    // Caller should still render this frame and defer swapchain recreation.
+    if (acquire_result == VK_SUBOPTIMAL_KHR) {
+        return AcquireResult::Suboptimal;
     }
     if (acquire_result != VK_SUCCESS) {
         fprintf(stderr, "Vulkan error at %s:%d: %d\n", __FILE__, __LINE__, acquire_result);
@@ -414,7 +420,7 @@ auto VulkanContext::immediate_submit(std::function<void(CommandBuffer)> const& w
     VK_CHECK(vkQueueWaitIdle(_graphics_queue));
 }
 
-auto VulkanContext::submit_and_present(uint32_t image_index) -> void {
+auto VulkanContext::submit_and_present(uint32_t image_index, uint64_t cuda_timeline_wait_value) -> PresentResult {
     if (_headless) {
         throw std::runtime_error("submit_and_present not available in headless mode");
     }
@@ -422,11 +428,33 @@ auto VulkanContext::submit_and_present(uint32_t image_index) -> void {
     // Use per-image render_finished semaphore indexed by the acquired image
     VkSemaphore render_finished_sem = _render_finished_semaphores[_current_image_index];
     
-    VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    // Wait on both the swapchain acquire semaphore (binary) and the CUDA
+    // timeline semaphore so Vulkan cannot sample stale/in-progress interop data.
+    // Binary acquire handles swapchain readiness; timeline value gates CUDA
+    // producer completion for the shared image.
+    VkSemaphore wait_semaphores[] = {_image_available_semaphore, _cuda_timeline_semaphore};
+    VkPipelineStageFlags wait_stages[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,  // swapchain acquire
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT           // CUDA shared image read
+    };
+    
+    // Timeline submit payload binds this submit to an exact CUDA frame value.
+    // Binary semaphores still participate in this submit with ignored value 0.
+    uint64_t wait_values[] = {0, cuda_timeline_wait_value};
+    uint64_t signal_values[] = {0};  // render_finished_sem is binary
+    
+    VkTimelineSemaphoreSubmitInfo timeline_info = {};
+    timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline_info.waitSemaphoreValueCount = 2;
+    timeline_info.pWaitSemaphoreValues = wait_values;
+    timeline_info.signalSemaphoreValueCount = 1;
+    timeline_info.pSignalSemaphoreValues = signal_values;
+    
     VkSubmitInfo submit_info = {};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &_image_available_semaphore;
+    submit_info.pNext = &timeline_info;
+    submit_info.waitSemaphoreCount = 2;
+    submit_info.pWaitSemaphores = wait_semaphores;
     submit_info.pWaitDstStageMask = wait_stages;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &_vk_command_buffer;
@@ -444,14 +472,17 @@ auto VulkanContext::submit_and_present(uint32_t image_index) -> void {
     present_info.pImageIndices = &image_index;
     
     VkResult present_result = vkQueuePresentKHR(_graphics_queue, &present_info);
-    // VK_ERROR_OUT_OF_DATE_KHR and VK_SUBOPTIMAL_KHR are not errors here - 
-    // the frame was still presented, and we'll handle swapchain recreation on next acquire
-    if (present_result != VK_SUCCESS && 
-        present_result != VK_ERROR_OUT_OF_DATE_KHR && 
-        present_result != VK_SUBOPTIMAL_KHR) {
+    if (present_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        return PresentResult::OutOfDate;
+    }
+    if (present_result == VK_SUBOPTIMAL_KHR) {
+        return PresentResult::Suboptimal;
+    }
+    if (present_result != VK_SUCCESS) {
         fprintf(stderr, "Vulkan error at %s:%d: %d\n", __FILE__, __LINE__, present_result);
         throw std::runtime_error("Vulkan present error");
     }
+    return PresentResult::Success;
 }
 
 #ifdef _WIN32
@@ -579,6 +610,7 @@ auto VulkanContext::_create_instance() -> void {
         extensions.assign(glfw_extensions, glfw_extensions + glfw_extension_count);
     }
     
+    // Required to query/enable CUDA interop support on candidate devices.
     extensions.push_back(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME);
     extensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME);
     extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
@@ -710,6 +742,7 @@ auto VulkanContext::_create_device() -> void {
     queue_create_info.queueCount = 1;
     queue_create_info.pQueuePriorities = &queue_priority;
     
+    // External memory + semaphore extensions are the core Vulkan<->CUDA bridge.
     std::vector<const char*> extensions = {
         VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
 #ifdef _WIN32
@@ -750,7 +783,8 @@ auto VulkanContext::_create_device() -> void {
     dynamic_rendering_features.pNext = &shader_object_features;
     dynamic_rendering_features.dynamicRendering = VK_TRUE;
     
-    // Enable synchronization2 for vkCmdPipelineBarrier2
+    // synchronization2 is used for explicit image ownership/layout transitions
+    // between graphics and external (CUDA) queue families.
     VkPhysicalDeviceSynchronization2Features sync2_features = {};
     sync2_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
     sync2_features.pNext = &dynamic_rendering_features;
@@ -859,7 +893,8 @@ auto VulkanContext::_create_timeline_semaphore() -> void {
     timeline_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     timeline_info.initialValue = 0;
     
-    // Export info for CUDA interop
+    // Export info for CUDA interop. A timeline semaphore lets CUDA signal N and
+    // Vulkan wait for N per frame without binary semaphore churn.
     // Windows: Opaque Win32 handle for timeline semaphore interop with CUDA
     // Linux: Opaque FD works for timeline semaphores
     VkExportSemaphoreCreateInfo export_info = {};

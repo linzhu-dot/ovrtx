@@ -14,12 +14,4 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Macro for creating ovx_string_t from string literals */
-#define literal_to_ovx_string(str) ovx_string_t{ (str), sizeof(str) - 1 }
-
-static inline bool is_ovx_string_empty(const ovx_string_t* str)
-{
-    return str->ptr == NULL || str->length == 0;
-}
-
 #endif /* PATH_DICTIONARY_HELPER_H */

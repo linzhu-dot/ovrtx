@@ -26,129 +26,55 @@ In Python, ovrtx raises `RuntimeError` with descriptive messages on failure. In 
 
 All Python API methods raise `RuntimeError` on failure:
 
-```python
-try:
-    renderer = ovrtx.Renderer()
-    renderer.add_usd("/nonexistent/file.usda")
-except RuntimeError as e:
-    print(f"Error: {e}")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `step-async-polling`
+>
+> All Python API methods raise `RuntimeError` on failure. The test demonstrates the async error surface pattern.
 
 ### Async operation errors
 
 Errors from async operations surface when you call `wait()`:
 
-```python
-op = renderer.add_usd_async("/nonexistent/file.usda")
-try:
-    op.wait()
-except RuntimeError as e:
-    print(f"Load failed: {e}")
-```
+> **Source:** `tests/test_ovrtx.py` snippet `step-async-polling`
 
 ### Step errors
 
-```python
-try:
-    products = renderer.step(
-        render_products={"/Render/Camera"},
-        delta_time=1.0/60
-    )
-except RuntimeError as e:
-    print(f"Step failed: {e}")
-```
+> **Source:** `examples/python/minimal/main.py` snippet `step`
+>
+> Wrap in `try/except RuntimeError` to handle step failures.
 
 ## C
 
 ### Check every return value
 
-```c
-bool initialized = false;
-ovrtx_renderer_t* renderer = nullptr;
-ovrtx_step_result_handle_t step_result = OVRTX_INVALID_HANDLE;
+> **Source:** `examples/c/minimal/main.cpp` snippet `create-renderer`
+>
+> Followed by: `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Every API call returns a status code. Check with the `check-error-helper` snippet pattern.
 
-ovrtx_result_t result = ovrtx_initialize(&config);
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "initialize failed: %.*s\n", (int)error.length, error.ptr);
-    goto cleanup;
-}
-initialized = true;
+### check_and_print_error helper function
 
-result = ovrtx_create_renderer(&config, &renderer);
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "create_renderer failed: %.*s\n", (int)error.length, error.ptr);
-    goto cleanup;
-}
+From the minimal C example -- a template helper that checks the status, prints to `std::cerr`, and returns whether an error occurred. Works with both `ovrtx_result_t` and `ovrtx_enqueue_result_t`:
 
-// ... do work, possibly creating step_result ...
-
-cleanup:
-if (step_result != OVRTX_INVALID_HANDLE && renderer) {
-    ovrtx_destroy_results(renderer, step_result);
-}
-if (renderer) {
-    ovrtx_destroy_renderer(renderer);
-}
-if (initialized) {
-    ovrtx_shutdown();
-}
-```
-
-### THROW_ON_ERROR macro pattern
-
-From the minimal C example -- wraps the check-and-throw pattern:
-
-```c
-#define THROW_ON_ERROR(RESULT, OPERATION)                                      \
-    do {                                                                       \
-        if (RESULT.status == OVRTX_API_ERROR) {                                \
-            ovx_string_t error = ovrtx_get_last_error();                       \
-            char error_msg[512];                                               \
-            if (error.ptr && error.length > 0) {                               \
-                snprintf(error_msg, sizeof(error_msg),                         \
-                         "ovrtx %s failed: %.*s",                              \
-                         OPERATION,                                            \
-                         (int)error.length, error.ptr);                        \
-            } else {                                                           \
-                snprintf(error_msg, sizeof(error_msg),                         \
-                         "ovrtx %s failed", OPERATION);                        \
-            }                                                                  \
-            throw std::runtime_error(error_msg);                               \
-        }                                                                      \
-    } while (0)
-
-// Usage:
-ovrtx_result_t result = ovrtx_create_renderer(&config, &renderer);
-THROW_ON_ERROR(result, "create_renderer");
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `check-error-helper`
 
 ### Per-operation errors from wait
 
 Asynchronous errors (e.g., file not found during USD load) are reported through `ovrtx_wait_op`:
 
-```c
-ovrtx_op_wait_result_t wait_result;
-ovrtx_result_t result = ovrtx_wait_op(
-    renderer, op_id, ovrtx_timeout_infinite, &wait_result);
+> **Source:** `examples/c/minimal/main.cpp` snippet `load-usd-and-wait`
+>
+> Check `wait_result.num_error_ops` and iterate `wait_result.error_op_ids` after `ovrtx_wait_op`.
 
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    fprintf(stderr, "wait_op failed: %.*s\n", (int)error.length, error.ptr);
-}
+### Log callback (C)
 
-// Check for per-operation errors
-if (wait_result.num_error_ops > 0) {
-    for (size_t i = 0; i < wait_result.num_error_ops; ++i) {
-        ovrtx_op_id_t failed_id = wait_result.error_op_ids[i];
-        ovx_string_t error = ovrtx_get_last_op_error(failed_id);
-        fprintf(stderr, "Operation %llu failed: %.*s\n",
-                (unsigned long long)failed_id,
-                (int)error.length, error.ptr);
-    }
-}
-```
+Set a callback to receive log messages from operations, with severity filtering:
+
+> **Source:** No example coverage yet. C API pattern:
+>
+> Call `ovrtx_set_log_callback(renderer, min_severity, channel, callback, user_data)` to register a log handler. Call `ovrtx_flush_op_log(renderer, timeout)` to flush pending messages. Pass `NULL` as callback to disable. See `ovrtx_log_severity_t` levels: `OVRTX_LOG_INFO` (0), `OVRTX_LOG_WARNING` (1), `OVRTX_LOG_ERROR` (2).
+
+Log severity levels: `OVRTX_LOG_INFO` (0), `OVRTX_LOG_WARNING` (1), `OVRTX_LOG_ERROR` (2). The callback may be invoked from any thread but is serialized per renderer instance. Message strings are only valid during the callback.
 
 ## Key Types / Functions
 
@@ -157,6 +83,8 @@ if (wait_result.num_error_ops > 0) {
 | `RuntimeError` | `result.status == OVRTX_API_ERROR` |
 | exception message | `ovrtx_get_last_error()` |
 | async error on `wait()` | `ovrtx_get_last_op_error(op_id)` |
+| (not exposed) | `ovrtx_set_log_callback(renderer, min_severity, channel, callback, user_data)` |
+| (not exposed) | `ovrtx_flush_op_log(renderer, timeout)` |
 
 C status codes:
 - `OVRTX_API_SUCCESS` (0) -- success

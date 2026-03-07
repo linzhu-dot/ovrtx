@@ -69,17 +69,20 @@ extern "C"
      */
 
     /**
-     * Initialize the ovrtx loader or increase its ref count. 
-     * 
-     * It is allowed to call this function multiple times and for each successful call a corresponding call to ovrtx_shutdown() 
-     * is required.
-     * 
-     * Note that explicit initialization is not required: creating a render instance with ovrtx_create_renderer() will also
-     * initialize the system if needed. Calling ovrtx_initialize() and ovrtx_shutdown() can be used
-     * to prevent system shutdown and initialization if the renderer is recreated multiple times.
-     * @param config Configuration for the ovrtx system
-     * @return 
-     * - **OVRTX_API_SUCCESS** if the system was initialized or ref-count was increased successfully,
+     * Initialize the ovrtx loader or increase its ref count.
+     *
+     * It is allowed to call this function multiple times and for each successful call a
+     * corresponding call to ovrtx_shutdown() is required.
+     *
+     * Note that explicit initialization is not required: creating a render instance with
+     * ovrtx_create_renderer() will also initialize the system if needed. Calling
+     * ovrtx_initialize() and ovrtx_shutdown() can be used to prevent system shutdown and
+     * initialization if the renderer is recreated multiple times.
+     * @param config Configuration for the ovrtx system (see @ref ovrtx_config.h). Must be
+     *               non-null; may be empty (entry_count 0) for defaults.
+     * @return
+     * - **OVRTX_API_SUCCESS** if the system was initialized or ref-count was increased
+     *   successfully,
      * - **OVRTX_API_ERROR** if initialization failed.
      */
     ovrtx_result_t ovrtx_initialize(const ovrtx_config_t* config);
@@ -87,26 +90,24 @@ extern "C"
     /**
      * Shuts down the ovrtx system or decreases it's ref count. One call per call to ovrtx_initialize() is required.
      * Note that any render instances that have not been destroyed will keep the system alive until they are destroyed.
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the system was released successfully (though might still be loaded),
      * - **OVRTX_API_ERROR** if the system shutdown failed or was not initialized.
      */
     ovrtx_result_t ovrtx_shutdown();
 
     /**
-     * Create a new renderer instance. System initialization is done automatically if ovrtx_initialize() has not
-     * been called yet, but in that case the config must contain both initialization and renderer settings.
-     * The system will be kept running until a corresponding call to ovrtx_destroy_renderer().
-     * @param config Configuration for the renderer (see @ref ovrtx_config.h "ovrtx_config.h"):
-     * - "binary_package_root_path" (STRING): path to the OVRTX binary package root directory.
-     * - "sync_mode" (BOOL): if true, stream operations execute synchronously (enqueue blocks).
-     * - "enable_profiling" (BOOL): if true, enables internal profiling.
-     * - "read_gpu_transforms" (BOOL): if true, uses GPU world transform propagation during rendering.
-     * - "log_file_path" (STRING): log file path for carb logging. The crash dump directory
-     *   is automatically set to the same directory as the log file.
-     * - "log_level" (STRING): log level string for carb logging (e.g., "verbose", "info", "warn", "error").
+     * Create a new renderer instance. System initialization is done automatically if
+     * ovrtx_initialize() has not been called yet, but in that case the config must contain
+     * both initialization and renderer settings. The system will be kept running until a
+     * corresponding call to ovrtx_destroy_renderer().
+     * @param config Configuration for the renderer (see @ref ovrtx_config.h). Must be non-null;
+     *               may be empty (entry_count 0) for defaults. Keys are enum-based (e.g.
+     *               OVRTX_CONFIG_SYNC_MODE, OVRTX_CONFIG_LOG_FILE_PATH,
+     *               OVRTX_CONFIG_ACTIVE_CUDA_GPUS); build entries with
+     *               ovrtx_config_entry_bool() and ovrtx_config_entry_string().
      * @param out_renderer [out] Renderer instance
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the renderer was created successfully,
      * - **OVRTX_API_ERROR** if the renderer creation failed.
      */
@@ -115,7 +116,7 @@ extern "C"
     /**
      * Destroy a renderer instance.
      * @param renderer Renderer instance to destroy
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the renderer was destroyed successfully,
      * - **OVRTX_API_ERROR** if the renderer destruction failed.
      */
@@ -130,7 +131,7 @@ extern "C"
     /**
      * Enqueue an asynchronous operation to add a USD file to the runtime stage representation.
      *
-     * Exactly one of the fields in the @ref ovrtx_usd_input_t must be set. 
+     * Exactly one of the fields in the @ref ovrtx_usd_input_t must be set.
      *
      * `ovrtx_add_usd()` will add the given USD input as a reference at the given path prefix. An empty path prefix will
      * instead result in the USD file being added as a sublayer.
@@ -146,7 +147,7 @@ extern "C"
      *                    If a combined prefix path and prim path inside the loaded usd file already exists an
      *                    error will be returned and the usd file will not be added.
      * @param out_add_usd_handle [out] Handle to the added usd file to be used with @ref ovrtx_remove_usd().
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the operation was enqueued successfully.
      * - **OVRTX_API_ERROR** if the operation was not enqueued successfully.
      */
@@ -160,7 +161,7 @@ extern "C"
      * All prims added to the stage during ovrtx_add_usd() will be removed from the stage.
      * @param instance Renderer instance
      * @param add_usd_handle Handle obtained from add_usd to identify the usd file to remove
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the usd file was removed successfully,
      * - **OVRTX_API_ERROR** if the usd file removal failed.
      */
@@ -176,7 +177,7 @@ extern "C"
      * @param source_path_in_usd Path to the source path to clone
      * @param target_paths Array of target paths to clone to
      * @param num_target_paths Number of target paths to clone to
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the path was cloned successfully,
      * - **OVRTX_API_ERROR** if the path cloning failed.
      */
@@ -188,7 +189,7 @@ extern "C"
     /**
      * Enqueue an asynchronous operation to reset the runtime stage representation to an empty stage.
      * @param instance Renderer instance
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the stage was reset successfully,
      * - **OVRTX_API_ERROR** if the stage reset failed.
      */
@@ -199,7 +200,7 @@ extern "C"
      * This operation will update all time-sampled attributes in the runtime stage representation to the provided USD time.
      * @param instance Renderer instance
      * @param usd_time USD time to update the stage to
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the stage was updated from the USD time successfully,
      * - **OVRTX_API_ERROR** if the stage update from USD time failed.
      */
@@ -232,7 +233,7 @@ extern "C"
      *                    With asynchronous access, the lifetime must be managed by the user,
      *                    while synchronous access incurs a synchronous copy during this call but
      *                    prevents any access after this call returns.
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the attribute was written successfully,
      * - **OVRTX_API_ERROR** if the attribute write failed.
      */
@@ -252,7 +253,7 @@ extern "C"
      *                    manage the lifetime.
      * @param mapping_desc Description of the mapping to use
      * @param out_attribute_mapping [out] Handle to the attribute mapping
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the attribute was mapped successfully,
      * - **OVRTX_API_ERROR** if the attribute mapping failed.
      */
@@ -274,7 +275,7 @@ extern "C"
      * @param map_handle Handle to the attribute mapping to unmap
      * @param cuda_sync optional cuda synchronization to wait for before the mapped memory is accessed during the
      *                   application of the written data to the stage representation.
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the attribute was unmapped successfully,
      * - **OVRTX_API_ERROR** if the attribute unmap failed.
      */
@@ -290,7 +291,7 @@ extern "C"
      * @param instance Renderer instance
      * @param description Description of the binding to create
      * @param out_attribute_binding_handle [out] Handle to the attribute binding
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the attribute binding was created successfully,
      * - **OVRTX_API_ERROR** if the attribute binding creation failed.
      */
@@ -302,7 +303,7 @@ extern "C"
      * Enqueue an asynchronous operation to destroy a persistent attribute binding.
      * @param instance Renderer instance
      * @param binding_handle Handle to the attribute binding to destroy
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the attribute binding was destroyed successfully,
      * - **OVRTX_API_ERROR** if the attribute binding destruction failed.
      */
@@ -331,7 +332,7 @@ extern "C"
      *                        provided set will be discarded.
      * @param delta_time Time step to simulate
      * @param out_step_result_handle [out] Handle to the step result
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the step was enqueued successfully,
      * - **OVRTX_API_ERROR** if the step enqueue failed.
      */
@@ -346,7 +347,7 @@ extern "C"
      * After the reset was executed, last_step_time will be updated to the provided time for the next call to ovrtx_step().
      * @param instance Renderer instance
      * @param time Time to reset the simulation to
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the reset was enqueued successfully,
      * - **OVRTX_API_ERROR** if the reset enqueue failed.
      */
@@ -372,7 +373,7 @@ extern "C"
      * @param timeout Timeout for the operation.
      *                Passing 0 will make the operation non-blocking and return immediately with the current status of the operation.
      * @param out_render_product_set_outputs [out] Render product set outputs
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the render product set outputs were retrieved successfully,
      * - **OVRTX_API_ERROR** if the operation failed,
      * - **OVRTX_API_TIMEOUT** if the result could not be obtained within the timeout.
@@ -401,7 +402,7 @@ extern "C"
      * @param timeout Timeout for the operation.
      *                Passing 0 will make the operation non-blocking and return immediately with the current status of the operation.
      * @param out_rendered_output [out] Rendered output
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the output was mapped successfully.
      * - **OVRTX_API_ERROR** if the output mapping failed.
      * - **OVRTX_API_TIMEOUT** if the result could not be obtained within the timeout.
@@ -421,7 +422,7 @@ extern "C"
      * @param instance Renderer instance.
      * @param map_handle Handle to the map to unmap.
      * @param before_destroy_cuda_sync CUDA synchronization to wait for before the mapped memory is destroyed.
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the output was unmapped successfully,
      * - **OVRTX_API_ERROR** if the output unmapping failed.
      */
@@ -434,7 +435,7 @@ extern "C"
      * map_rendered_output. Those are only released through unmap_rendered_output.
      * @param instance Renderer instance
      * @param result_handle Handle to the step result to destroy
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the step result was destroyed successfully,
      * - **OVRTX_API_ERROR** if the step result destruction failed.
      */
@@ -457,7 +458,7 @@ extern "C"
      * @param op_id Operation id to wait for
      * @param time_out Timeout for the operation
      * @param out_wait_result [out] Wait result information (errors and active operation ids)
-     * @return 
+     * @return
      * - **OVRTX_API_SUCCESS** if the operations were waited for successfully,
      * - **OVRTX_API_ERROR** if the wait failed (e.g., invalid op id),
      * - **OVRTX_API_TIMEOUT** if not all operations completed within the timeout.
@@ -467,42 +468,138 @@ extern "C"
             ovrtx_timeout_t time_out,
             ovrtx_op_wait_result_t* out_wait_result);
 
+    /*--------------------------------------------------*/
+    /* Operation status query */
+    /*--------------------------------------------------*/
+
+    /**
+     * Query the status of a long-running operation.
+     *
+     * This operation is synchronous and returns immediately with the current
+     * status of the specified operation. The returned status structure contains
+     * progress information and named resource counters.
+     *
+     * All strings and pointers in out_status are valid until ovrtx_release_op_status
+     * is called. This function must be paired with ovrtx_release_op_status.
+     *
+     * Counter semantics:
+     * - name: Identifies the resource type (e.g., "shaders", "textures", "materials")
+     * - current: Number of items processed so far
+     * - total: Total items to process, or 0 if the total is not yet known
+     * - The set of counters varies by operation type
+     *
+     * @param instance Renderer instance
+     * @param op_id Operation ID to query (from ovrtx_enqueue_result_t.op_index)
+     * @param out_status [out] Status information for the operation
+     * @return OVRTX_API_SUCCESS if status was retrieved successfully,
+     *         OVRTX_API_ERROR if op_id is invalid or query failed
+     */
+    ovrtx_result_t ovrtx_query_op_status(ovrtx_renderer_t* instance,
+        ovrtx_op_id_t op_id,
+        ovrtx_op_status_t* out_status);
+
+    /**
+     * Release resources associated with a previously queried operation status.
+     *
+     * After this call, all pointers in the status structure become invalid.
+     * This must be called for every successful ovrtx_query_op_status call.
+     *
+     * @param instance Renderer instance
+     * @param status Status structure to release (previously obtained from
+     *               ovrtx_query_op_status)
+     * @return OVRTX_API_SUCCESS if released successfully,
+     *         OVRTX_API_ERROR if release failed
+     */
+    ovrtx_result_t ovrtx_release_op_status(ovrtx_renderer_t* instance,
+        ovrtx_op_status_t* status);
+
     /** @} */ // end of ovrtx_stream
 
     /** @defgroup ovrtx_extension Extension querying
      *  @{
      */
 
-    /**
-     * Query for an internal extension interface by name.
-     * @param name The name of the extension
-     * @param vtable [out] Vtable with function pointers for the extension
-     * @return 
-     * - **OVRTX_API_SUCCESS** if the extension was queried successfully,
-     * - **OVRTX_API_ERROR** if the extension is unavailable or if the system is not initialized yet.
-     */
-   ovrtx_result_t ovrtx_query_extension(const char* name,
-        const void** vtable);
-
-    /** @} */ // end of ovrtx_extension
 
     /** @defgroup ovrtx_error Error handling
-     *  @{
-     */
+    *  @{
+    */
 
     /**
-     * Returns the error string for the latest API call on the calling thread. The string is 
+     * Returns the error string for the latest API call on the calling thread. The string is
      * valid until the next API call (or any call that might perform a fiber switch) on the same thread.
      */
     ovx_string_t ovrtx_get_last_error();
 
     /**
-     * Returns the error string for the provided operation id from the last call to ovrtx_wait_op  
+     * Returns the error string for the provided operation id from the last call to ovrtx_wait_op
      * on the calling thread. The string is valid until the next call to ovrtx_wait_op (or any call
      * that might perform a fiber switch) on the same thread.
      * @param op_id Operation id to get the error string for
      */
     ovx_string_t ovrtx_get_last_op_error(ovrtx_op_id_t op_id);
+
+    /*--------------------------------------------------*/
+    /* Logging callback */
+    /*--------------------------------------------------*/
+
+    /**
+     * Set a callback to receive log messages from operations.
+     *
+     * The callback will be invoked for each log message generated by any
+     * operation on this renderer instance that matches the filter criteria.
+     * Only one callback can be active at a time; setting a new callback
+     * replaces the previous one.
+     *
+     * Pass NULL as the callback to disable logging callbacks.
+     *
+     * This function can be called multiple times to change the severity filter,
+     * channel filter, or callback at runtime without missing messages.
+     *
+     * Thread safety: The callback may be invoked from any thread. The
+     * implementation guarantees that callbacks are serialized (no concurrent
+     * invocations for the same renderer instance).
+     *
+     * @param instance Renderer instance
+     * @param min_severity Minimum severity level to receive (messages with lower
+     *                     severity are filtered out). Use OVRTX_LOG_INFO to receive
+     *                     all messages.
+     * @param channel_filter Optional channel name filter. If non-NULL, only messages
+     *                       from the specified channel are delivered. Pass NULL to
+     *                       receive messages from all channels.
+     * @param callback Callback function to receive log messages, or NULL to disable
+     * @param user_data User-provided context passed to each callback invocation
+     * @return OVRTX_API_SUCCESS if callback was set successfully,
+     *         OVRTX_API_ERROR if setting failed
+     */
+    ovrtx_result_t ovrtx_set_log_callback(ovrtx_renderer_t* instance,
+        ovrtx_log_severity_t min_severity,
+        const ovx_string_t* channel_filter,
+        ovrtx_log_callback_t callback,
+        void* user_data);
+
+    /**
+     * Flush all pending log messages through the callback.
+     *
+     * This operation blocks until all log messages generated
+     *up to this point have been delivered through the log callback.
+     * This is useful when you need to ensure all logs have been
+     * processed before proceeding (e.g., after an operation completes or fails).
+     *
+     * If no log callback is set, this function returns immediately with success.
+     *
+     * Note: This only flushes messages generated before this call. Messages
+     * generated concurrently or after this call may not be included.
+     *
+     * @param instance Renderer instance
+     * @param timeout Maximum time to wait for flush to complete
+     * @return OVRTX_API_SUCCESS if all pending logs were flushed,
+     *         OVRTX_API_TIMEOUT if flush did not complete within timeout,
+     *         OVRTX_API_ERROR if op_id is invalid or flush failed
+     */
+    ovrtx_result_t ovrtx_flush_op_log(ovrtx_renderer_t* instance,
+        ovrtx_timeout_t timeout);
+
+    /*--------------------------------------------------*/
 
     /** @} */ // end of ovrtx_error
 

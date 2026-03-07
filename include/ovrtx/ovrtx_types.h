@@ -11,7 +11,7 @@
 #define OVRTX_TYPES_H
 
 #define OVRTX_VERSION_MAJOR 0
-#define OVRTX_VERSION_MINOR 1
+#define OVRTX_VERSION_MINOR 2
 #define OVRTX_VERSION_PATCH 0
 
 #include <stdint.h>
@@ -199,22 +199,49 @@ extern "C"
         OVRTX_BINDING_PRIM_MODE_CREATE_NEW = 2, /**< New attribute/prim pairs are created when written to */
     } ovrtx_binding_prim_mode_t;
 
-    /** Used to differentiate the intended usage of a given attribute type. 
+    /** Used to differentiate the intended data layout and usage of a given attribute type. 
      *  
-     * For example, an attribute with 3-float elements could be interpreted as a vector or as an RGB color. This enum
-     * differentiates between them.
+     * For example a transform attribute can be written as different data layouts that are automatically converted into renderer's
+     * data layout. This enum is used to differentiate between data layouts written to the same attribute.
      */
     typedef enum ovrtx_attribute_semantic_t
     {
         OVRTX_SEMANTIC_NONE = 0, 
-        OVRTX_SEMANTIC_TRANSFORM_4x4 = 1, /**< Transform of a prim expressed as column-major 4x4 matrix of double (kDLFloat, 64, 16) */
-        OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT4f_SCALE3f = 2, /**< Transform of a prim expressed as 3xdouble position, 4xfloat rotation and 3xfloat scale (kDLUInt, 8, 56) */
-        OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT3x3f = 3, /**< Transform of a prim expressed as 3xdouble position, 3x3float rotation matrix (kDLUInt, 8, 64) */
+        OVRTX_SEMANTIC_XFORM_MAT4x4 = 1, /**< Transform of a prim expressed as row-major 4x4 matrix of double (kDLFloat, 64, 16) */
+        OVRTX_SEMANTIC_XFORM_POS3d_ROT4f_SCALE3f = 2, /**< Transform of a prim expressed as 3xdouble position, 4xfloat rotation and 3xfloat scale (kDLUInt, 8, 56) */
+        OVRTX_SEMANTIC_XFORM_POS3d_ROT3x3f = 3, /**< Transform of a prim expressed as 3xdouble position, 3x3float row-major rotation matrix (kDLUInt, 8, 64) */
         OVRTX_SEMANTIC_PATH_STRING = 4, /**< Prim paths expressed as ovx_string_t (kDLUInt, 128, 1). The strings must be valid for the duration of the write_attribute call. Only synchronous data access is supported.*/
         OVRTX_SEMANTIC_TOKEN_STRING = 5,  /**< String token expressed as ovx_string_t (kDLUInt, 128, 1). The strings must be valid for the duration of the write_attribute call. Only synchronous data access is supported.*/
-        OVRTX_SEMANTIC_COLOR_RGBA4b = 6, /**< A color expressed as 4 bytes (kDLUInt, 8, 4) */
-        OVRTX_SEMANTIC_COLOR_RGB3f = 7, /**< A color expressed as 3 floats (kDLFloat, 32, 3) */
     }ovrtx_attribute_semantic_t;
+
+    /*
+    * Input attribute element type for OVRTX_SEMANTIC_XFORM_MAT4x4
+    */ 
+    typedef struct ovrtx_xform_matrix44d_t
+    {
+        double v[16]; // row-major matrix 4x4 double values
+    } ovrtx_xform_matrix44d_t;
+
+    /*
+    * Input attribute element type for OVRTX_SEMANTIC_XFORM_POS3d_ROT4f_SCALE3f
+    */
+    typedef struct ovrtx_xform_pos3d_rot4f_scale3f_t
+    {
+        double position[3];
+        float rot_quat_xyzw[4];
+        float scale[3];
+        uint32_t padding;
+    } ovrtx_xform_pos3d_rot4f_scale3f_t;
+
+    /*
+    * Input attribute element type for OVRTX_SEMANTIC_XFORM_POS3d_ROT3x3f
+    */
+    typedef struct ovrtx_xform_pos3d_rot3x3f_t
+    {
+        double position[3];
+        float rot_matrix[9];  /* 3x3 row-major rotation matrix */
+        uint32_t padding;
+    } ovrtx_xform_pos3d_rot3x3f_t;
 
     /** Describes the type of an attribute to be written to the runtime stage. */
     typedef struct  
@@ -419,21 +446,165 @@ extern "C"
         ovrtx_output_buffer_t buffer; /**< Buffer containing the rendered data */
     } ovrtx_rendered_output_t;
 
-    /** Type of a value contained in @ref ovrtx_renderer_config_value_t */
-    typedef enum ovrtx_renderer_config_value_type_t
-    {
-        OVRTX_CONFIG_VALUE_BOOL,
-        OVRTX_CONFIG_VALUE_INT64,
-        OVRTX_CONFIG_VALUE_UINT64,
-        OVRTX_CONFIG_VALUE_DOUBLE,
-        OVRTX_CONFIG_VALUE_STRING,
-        OVRTX_CONFIG_VALUE_BLOB,
-    } ovrtx_renderer_config_value_type_t;
+    /*--------------------------------------------------*/
+    /* Operation status types */
+    /*--------------------------------------------------*/
 
-    /** A value to be passed as an entry in the @ref ovrtx_config_t configuration dictionary. */
+    /**
+     * Named resource counter for tracking progress of specific resource types.
+     * 
+     * Counter semantics:
+     * - name: Identifies the resource type (e.g., "shaders", "textures", "materials")
+     * - current: Number of items processed so far
+     * - total: Total items to process, or 0 if the total is not yet known
+     */
+    typedef struct ovrtx_op_counter_t
+    {
+        ovx_string_t name;     /**< Counter name (e.g., "shaders", "textures") */
+        uint64_t current;      /**< Number of items processed so far */
+        uint64_t total;        /**< Total number of items to process (0 if unknown) */
+    } ovrtx_op_counter_t;
+
+    /**
+     * Operation status information for long-running operations.
+     * 
+     * Progress semantics:
+     * - Range [0.0, 1.0] where 1.0 = complete
+     * - Negative value indicates indeterminate progress
+     */
+    typedef struct ovrtx_op_status_t
+    {
+        ovrtx_op_id_t op_id;            /**< Operation ID this status refers to */
+        ovrtx_event_status_t state;     /**< PENDING, COMPLETED, or FAILURE */
+        
+        /** Progress as fraction [0.0, 1.0], or negative if indeterminate */
+        double progress;
+        
+        /** Named resource counters (variable count, operation-dependent) */
+        ovrtx_op_counter_t* counters;
+        size_t counter_count;
+    } ovrtx_op_status_t;
+
+    /*--------------------------------------------------*/
+    /* Logging callback types */
+    /*--------------------------------------------------*/
+
+    /**
+     * Log severity levels for operation messages.
+     */
+    typedef enum ovrtx_log_severity_t
+    {
+        OVRTX_LOG_INFO = 0,     /**< Informational message */
+        OVRTX_LOG_WARNING = 1,  /**< Warning (operation continues) */
+        OVRTX_LOG_ERROR = 2,    /**< Error (operation may have failed) */
+    } ovrtx_log_severity_t;
+
+    /**
+     * Callback function type for receiving operation log messages.
+     * 
+     * This callback is invoked from the operation's execution context when
+     * a log message is generated. The callback must be thread-safe as it may
+     * be called from any thread.
+     * 
+     * The message string is only valid for the duration of the callback.
+     * If the message needs to be retained, copy it before returning.
+     * 
+     * @param op_id Operation ID that generated this message
+     * @param severity Severity level of the message
+     * @param timestamp Time in seconds since operation started
+     * @param message Log message text (valid only during callback)
+     * @param user_data User-provided context from ovrtx_set_log_callback
+     */
+    typedef void (*ovrtx_log_callback_t)(ovrtx_op_id_t op_id,
+                                         ovrtx_log_severity_t severity,
+                                         double timestamp,
+                                         ovx_string_t message,
+                                         void* user_data);
+
+
+    /** Key type tag for @ref ovrtx_config_entry_t; selects which key and value union members are valid. */
+    typedef enum ovrtx_config_key_type_t
+    {
+        OVRTX_CONFIG_KEY_TYPE_BOOL,
+        OVRTX_CONFIG_KEY_TYPE_INT64,
+        OVRTX_CONFIG_KEY_TYPE_UINT64,
+        OVRTX_CONFIG_KEY_TYPE_DOUBLE,
+        OVRTX_CONFIG_KEY_TYPE_STRING,
+        OVRTX_CONFIG_KEY_TYPE_BLOB,
+        OVRTX_CONFIG_KEY_TYPE_COUNT
+    } ovrtx_config_key_type_t;
+
+    /** Boolean config keys. Value type: bool. Used at init and create_renderer (must match). */
+    typedef enum ovrtx_config_bool_t
+    {
+        /** If true, stream operations execute synchronously (enqueue blocks). Init and create_renderer. */
+        OVRTX_CONFIG_SYNC_MODE,
+        /** If true, enables internal profiling. Init and create_renderer. */
+        OVRTX_CONFIG_ENABLE_PROFILING,
+        /** If true, uses GPU world transform propagation during rendering. Create_renderer. */
+        OVRTX_CONFIG_READ_GPU_TRANSFORMS,
+        /** If true, outputs partial frames for incremental sensors. Create_renderer. */
+        OVRTX_CONFIG_OUTPUT_PARTIAL_FRAMES,
+        /** If true, keeps the renderer system alive after all instances are destroyed (for reuse). Create_renderer. */
+        OVRTX_CONFIG_KEEP_SYSTEM_ALIVE,
+        /** If true, uses Vulkan; if false, uses DX12 (Windows only). Create_renderer.
+         *  When not specified, defaults to platform default (DX12 on Windows, Vulkan on Linux). */
+        OVRTX_CONFIG_USE_VULKAN,
+        OVRTX_CONFIG_BOOL_COUNT
+    } ovrtx_config_bool_t;
+
+    /** String config keys. Value type: ovx_string_t. Used at init and create_renderer (must match). */
+    typedef enum ovrtx_config_string_t
+    {
+        /** Path to OVRTX binary package root. Loader uses for dylib and resources.
+         * Init and create_renderer (must match). */
+        OVRTX_CONFIG_BINARY_PACKAGE_ROOT_PATH,
+        /** Log file path for carb logging. Applied when first renderer is created. Init and create_renderer. */
+        OVRTX_CONFIG_LOG_FILE_PATH,
+        /** Log level for carb logging (e.g. "verbose", "info", "warn", "error"). Init and create_renderer. */
+        OVRTX_CONFIG_LOG_LEVEL,
+        /** Comma-separated CUDA device indices to use (e.g. "0,1,2"). Create_renderer. */
+        OVRTX_CONFIG_ACTIVE_CUDA_GPUS,
+        OVRTX_CONFIG_STRING_COUNT
+    } ovrtx_config_string_t;
+
+    /** Int64 config keys (reserved for future use). Value type: int64_t. */
+    typedef enum ovrtx_config_int64_t
+    {
+        OVRTX_CONFIG_INT64_COUNT
+    } ovrtx_config_int64_t;
+
+    /** Uint64 config keys (reserved for future use). Value type: uint64_t. */
+    typedef enum ovrtx_config_uint64_t
+    {
+        OVRTX_CONFIG_UINT64_COUNT
+    } ovrtx_config_uint64_t;
+
+    /** Double config keys (reserved for future use). Value type: double. */
+    typedef enum ovrtx_config_double_t
+    {
+        OVRTX_CONFIG_DOUBLE_COUNT
+    } ovrtx_config_double_t;
+
+    /** Blob config keys (reserved for future use). Value type: ptr + size. */
+    typedef enum ovrtx_config_blob_t
+    {
+        OVRTX_CONFIG_BLOB_COUNT
+    } ovrtx_config_blob_t;
+
+    /** A config entry. key_type selects which member of key and value is valid. */
     typedef struct
     {
-        ovrtx_renderer_config_value_type_t type;
+        ovrtx_config_key_type_t key_type;
+        union
+        {
+            ovrtx_config_bool_t bool_key;
+            ovrtx_config_int64_t int64_key;
+            ovrtx_config_uint64_t uint64_key;
+            ovrtx_config_double_t double_key;
+            ovrtx_config_string_t string_key;
+            ovrtx_config_blob_t blob_key;
+        } key;
         union
         {
             bool bool_value;
@@ -446,20 +617,14 @@ extern "C"
                 const void* data;
                 size_t size;
             } blob_value;
-        };
-    } ovrtx_renderer_config_value_t;
+        } value;
+    } ovrtx_config_entry_t;
 
-    /** An key/value entry in the @ref ovrtx_config_t configuration dictionary. */
+    /** Config passed to @ref ovrtx_initialize() and @ref ovrtx_create_renderer().
+     * Non-null required; empty (entry_count 0) means defaults. */
     typedef struct
     {
-        ovx_string_t key;
-        ovrtx_renderer_config_value_t value;
-    } ovrtx_renderer_config_entry_t;
-
-    /** A dictionary of key/value pairs that can be passed to @ref ovrtx_initialize() or @ref ovrtx_create_renderer(). */
-    typedef struct
-    {
-        const ovrtx_renderer_config_entry_t* entries;
+        const ovrtx_config_entry_t* entries;
         size_t entry_count;
     } ovrtx_config_t;
 

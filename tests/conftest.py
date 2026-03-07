@@ -15,18 +15,16 @@ import pytest
 
 def pytest_addoption(parser):
     """Register custom pytest command-line options."""
-    from ovrtx.tests.test_ovrtx import TEST_OUTPUT_DIR
-
     parser.addoption(
         "--output",
         action="store",
-        default=str(TEST_OUTPUT_DIR),
+        default=str(Path(__file__).parent / "_output"),
         help="Directory for test output files (defaults to tests/_output)",
     )
     parser.addoption(
         "--test-data",
         action="store",
-        default=None,
+        default=str(Path(__file__).parent / "data"),
         help="Directory containing USD test data files (defaults to data/usd/tests/ovrtx in repo)",
     )
 
@@ -82,14 +80,9 @@ def usd_scene(request) -> Path:
         pytest.fail("Test must be decorated with @pytest.mark.usd_scene('scene_name.usda')")
 
     # Resolve test data directory: CLI option > fallback
-    data_path = request.config.getoption("--test-data")
-    if data_path:
-        data_dir = Path(data_path).resolve()
-    else:
-        data_dir = Path(__file__).parents[6] / "data" / "usd" / "tests" / "ovrtx"
-
+    data_path = Path(request.config.getoption("--test-data"))
     scene_name = marker.args[0]
-    scene_path = (data_dir / scene_name).resolve()
+    scene_path = (data_path / scene_name).resolve()
 
     if not scene_path.exists():
         pytest.fail(f"USD scene file not found: {scene_path}")
@@ -106,14 +99,18 @@ def shared_renderer(test_output_dir):
 
     Tests should use the `renderer` fixture which calls reset_stage() for cleanup.
     """
-    from ovrtx.tests.test_ovrtx import OVRTX_TEST_CONFIG
-
-    from ovrtx import Renderer
+    from ovrtx import Renderer, RendererConfig
 
     # Update log file path to use test_output_dir from CLI option
-    OVRTX_TEST_CONFIG.log_file_path = str(test_output_dir / "test_ovrtx.log")
+    # [snippet:renderer-config]
+    _OVRTX_TEST_CONFIG = RendererConfig(
+        # Configure logging via OVRTX config
+        log_level="info",
+        log_file_path=str(test_output_dir / "test_ovrtx.log"),
+    )
 
-    renderer = Renderer(OVRTX_TEST_CONFIG)
+    renderer = Renderer(_OVRTX_TEST_CONFIG)
+    # [/snippet:renderer-config]
     yield renderer
     del renderer
 

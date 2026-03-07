@@ -51,4 +51,4 @@ Options
    * - ``--log``
      - Enable carb log file in ``_output/``
 
-The first time the example is run, driver shader compilation will be performed and cached. Subsequent runs will be much faster.
+The first time you run the example, the driver compiles and caches shaders. Subsequent runs are much faster.

@@ -7,21 +7,26 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import ctypes
+import math
 import sys
 from typing import Any, List, Optional
 
 from . import bindings
-from .dlpack import DLDataType, DLTensor
+from .dlpack import DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, DLTensor
 from .types import (
     AttributeBinding,
     AttributeMapping,
+    DataAccess,
+    Device,
     FrameOutput,
     Operation,
+    PrimMode,
     ProductOutput,
     RendererConfig,
     RendererResult,
     RenderProductSetOutputs,
     RenderVarOutput,
+    Semantic,
 )
 
 
@@ -34,7 +39,7 @@ class _AttributeBindingDescStorage:
         attribute_name: str,
         dtype: DLDataType,
         semantic: int,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
         flags: int = bindings.OVRTX_BINDING_FLAG_NONE,
         is_array: bool = False,
     ):
@@ -55,17 +60,6 @@ class _AttributeBindingDescStorage:
             string=self._attr_string, token=0  # String reference kept in self
         )
 
-        # Convert prim_mode string to enum
-        prim_mode_normalized = prim_mode.strip().lower()
-        if prim_mode_normalized == "existing_only":
-            prim_mode_enum = bindings.OVRTX_BINDING_PRIM_MODE_EXISTING_ONLY
-        elif prim_mode_normalized == "must_exist":
-            prim_mode_enum = bindings.OVRTX_BINDING_PRIM_MODE_MUST_EXIST
-        elif prim_mode_normalized == "create_new":
-            prim_mode_enum = bindings.OVRTX_BINDING_PRIM_MODE_CREATE_NEW
-        else:
-            raise ValueError(f"Invalid prim_mode: {prim_mode}. Must be 'existing_only', 'must_exist', or 'create_new'")
-
         # Build attribute_type
         self.attribute_type = bindings.ovrtx_attribute_type_t(
             dtype=dtype,
@@ -79,7 +73,7 @@ class _AttributeBindingDescStorage:
             prims_list_handle=0,  # Not using persistent handles
             attribute_name=self.attribute_name,
             attribute_type=self.attribute_type,
-            prim_mode=bindings.ovrtx_binding_prim_mode_t(prim_mode_enum),
+            prim_mode=bindings.ovrtx_binding_prim_mode_t(prim_mode),
             flags=bindings.ovrtx_binding_flag_t(flags),
         )
 
@@ -92,12 +86,20 @@ class _AttributeBindingDescStorage:
 class _InputBufferStorage:
     """Helper class to keep input buffer and DLTensor arrays alive (private implementation detail)."""
 
-    def __init__(self, dl_tensors: List[DLTensor], dirty_bits: Optional[bytes] = None):
+    def __init__(
+        self,
+        dl_tensors: List[DLTensor],
+        dirty_bits: Optional[bytes] = None,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
+    ):
         """Initialize input buffer storage.
 
         Args:
             dl_tensors: List of DLTensor objects (will be copied to array)
             dirty_bits: Optional dirty bit array (copied if provided)
+            cuda_stream: Optional CUDA stream handle (int). Sets both access and done sync stream fields.
+            cuda_event: Optional CUDA event handle (int). Sets access sync wait_event field.
         """
         # Keep Python data references alive (for ASYNC access)
         self._tensor_refs = dl_tensors
@@ -152,14 +154,23 @@ class _InputBufferStorage:
             self._dirty_bits_array = (ctypes.c_uint8 * dirty_bits_size).from_buffer_copy(dirty_bits)
             dirty_bits_ptr = ctypes.cast(self._dirty_bits_array, ctypes.POINTER(ctypes.c_uint8))
 
+        # Build CUDA sync structs (fields default to 0)
+        access_sync = bindings.ovrtx_cuda_sync_t()
+        done_sync = bindings.ovrtx_cuda_sync_t()
+        if cuda_stream is not None:
+            access_sync.stream = cuda_stream
+            done_sync.stream = cuda_stream
+        if cuda_event is not None:
+            access_sync.wait_event = cuda_event
+
         # Build input_buffer pointing to array
         self.input_buffer = bindings.ovrtx_input_buffer_t(
             tensors=self._tensor_array,  # Array reference kept in self
             tensor_count=len(self._tensor_storage),
             dirty_bits=dirty_bits_ptr,
             dirty_bits_size=dirty_bits_size,
-            access_cuda_sync=bindings.ovrtx_cuda_sync_t(),
-            done_cuda_sync=bindings.ovrtx_cuda_sync_t(),
+            access_cuda_sync=access_sync,
+            done_cuda_sync=done_sync,
         )
 
 
@@ -169,6 +180,10 @@ class Renderer:
     Wraps the C library with automatic resource management. Resources are
     cleaned up automatically when the renderer goes out of scope.
 
+    Enum types for method parameters are accessible as class attributes
+    (e.g., ``Renderer.PrimMode.EXISTING_ONLY``) or via top-level imports
+    (e.g., ``from ovrtx import PrimMode``).
+
     Example:
         ```python
         from ovrtx import Renderer, RendererConfig
@@ -177,12 +192,17 @@ class Renderer:
         renderer = Renderer()
 
         # Or customize
-        config = RendererConfig(mdl_base_path="custom/mdl/", sync_mode=True)
+        config = RendererConfig(sync_mode=True, log_file_path="/path/to/app.log")
         renderer = Renderer(config=config)
 
         # Resources automatically cleaned up when renderer goes out of scope
         ```
     """
+
+    Semantic = Semantic
+    PrimMode = PrimMode
+    DataAccess = DataAccess
+    Device = Device
 
     def __init__(self, config: Optional[RendererConfig] = None):
         """Create a new renderer instance.
@@ -236,6 +256,11 @@ class Renderer:
                 self._handle = None
                 self._bindings = None
                 self._config = None
+
+    @property
+    def version(self) -> tuple:
+        """Runtime library version as a (major, minor, patch) tuple."""
+        return self._bindings.version
 
     def add_usd(self, usd_file_path: str, path_prefix: Optional[str] = None) -> Any:
         """Add a USD file to the renderer (synchronous).
@@ -847,297 +872,414 @@ class Renderer:
     def _to_c_config(config: RendererConfig) -> bindings.ovrtx_config_t:
         """Convert RendererConfig to C structure.
 
-        Uses a whitelist of known config fields. Only whitelisted fields are converted.
-        Only whitelisted fields are converted to C config entries.
+        Uses a whitelist of known config fields. Only whitelisted fields are converted
+        to C config entries.
         """
-        # Whitelist: field_name -> factory_function
-        # Field names match C keys exactly (see ovrtx_config.h)
+        # Whitelist: field_name -> (factory_function, config_key_enum)
+        # Field names must match RendererConfig dataclass fields.
+        # Config key enums must match their C header counterparts in both name and
+        # integer value (see ovrtx_config_bool_t / ovrtx_config_string_t in ovrtx_types.h).
+        # Factories accept native Python types (bool / str) and handle lifetime internally.
         WHITELIST = {
-            "sync_mode": bindings.ovrtx_renderer_config_entry_t.from_bool,
-            "log_file_path": bindings.ovrtx_renderer_config_entry_t.from_string,
-            "log_level": bindings.ovrtx_renderer_config_entry_t.from_string,
+            "sync_mode": (bindings.ovrtx_config_entry_bool, bindings.OVRTX_CONFIG_SYNC_MODE),
+            "log_file_path": (bindings.ovrtx_config_entry_string, bindings.OVRTX_CONFIG_LOG_FILE_PATH),
+            "log_level": (bindings.ovrtx_config_entry_string, bindings.OVRTX_CONFIG_LOG_LEVEL),
+            "enable_profiling": (bindings.ovrtx_config_entry_bool, bindings.OVRTX_CONFIG_ENABLE_PROFILING),
+            "read_gpu_transforms": (bindings.ovrtx_config_entry_bool, bindings.OVRTX_CONFIG_READ_GPU_TRANSFORMS),
+            "output_partial_frames": (bindings.ovrtx_config_entry_bool, bindings.OVRTX_CONFIG_OUTPUT_PARTIAL_FRAMES),
+            "keep_system_alive": (bindings.ovrtx_config_entry_bool, bindings.OVRTX_CONFIG_KEEP_SYSTEM_ALIVE),
+            "active_cuda_gpus": (bindings.ovrtx_config_entry_string, bindings.OVRTX_CONFIG_ACTIVE_CUDA_GPUS),
         }
 
-        entries = []
-        for field_name, factory_func in WHITELIST.items():
+        entries: List[bindings.ovrtx_config_entry_t] = []
+        for field_name, (factory, key) in WHITELIST.items():
             value = getattr(config, field_name, None)
             if value is not None:
-                entries.append(factory_func(field_name, value))
+                entries.append(factory(key, value))
 
         return bindings.ovrtx_config_t(entries)
 
-    def _resolve_semantic_and_dtype(
-        self, semantic: Optional[str], dtype: Optional[DLDataType], context: str = "operation"
-    ) -> tuple[int, DLDataType]:
-        """Parse semantic string and resolve dtype.
+    @staticmethod
+    def _normalize_tensor_for_write(semantic_constant: int, tensor: DLTensor) -> DLTensor:
+        """Validate and optionally pass through a DLTensor for write_attribute.
 
-        Semantics imply specific dtype requirements due to Fabric compatibility:
-        - transform_4x4 → DLDataType(code=2, bits=64, lanes=16) (16 doubles)
-        - color_rgba4b → DLDataType(code=1, bits=8, lanes=4) (4 uint8)
-        - color_rgb3f → DLDataType(code=2, bits=32, lanes=3) (3 floats)
+        For semantics that support layout-compatible input (e.g. XFORM_MAT4x4), tensors
+        with a single component and the expected trailing shape (e.g. (N, 4, 4)) are
+        passed through to the C API, which accepts them via the layout-compatible path.
+        Tensors with the canonical multi-component dtype (e.g. 16 components) are also
+        passed through unchanged. Strides are preserved so that a non-zero stride on
+        the first dimension is supported by the C API.
 
         Args:
-            semantic: Semantic string ("transform_4x4", "color_rgba4b", "color_rgb3f", or None)
-            dtype: User-provided dtype (optional if semantic implies dtype)
-            context: Context string for error messages
+            semantic_constant: Parsed semantic constant (OVRTX_SEMANTIC_*).
+            tensor: Input DLTensor to validate and optionally pass through.
 
         Returns:
-            Tuple of (semantic_constant, semantic_dtype)
+            The same tensor (pass-through) when shape/dtype are valid for this semantic.
 
         Raises:
-            ValueError: If semantic is invalid, dtype is required but not provided,
-                       or if provided dtype doesn't match semantic
+            ValueError: If tensor has one component but shape does not match the
+                       expected layout for the given semantic.
         """
-        # 1. Parse semantic string to constant
-        if semantic is None:
-            semantic_constant = bindings.OVRTX_SEMANTIC_NONE
-        else:
-            semantic_normalized = semantic.strip().lower()
-            if semantic_normalized in ("none", ""):
-                semantic_constant = bindings.OVRTX_SEMANTIC_NONE
-            elif semantic_normalized in ("transform_4x4", "transform", "matrix"):
-                semantic_constant = bindings.OVRTX_SEMANTIC_TRANSFORM_4x4
-            elif semantic_normalized in ("color_rgba4b", "rgba4b", "rgba"):
-                semantic_constant = bindings.OVRTX_SEMANTIC_COLOR_RGBA4b
-            elif semantic_normalized in ("color_rgb3f", "rgb3f", "rgb"):
-                semantic_constant = bindings.OVRTX_SEMANTIC_COLOR_RGB3f
-            else:
-                raise ValueError(
-                    f"Invalid semantic: {semantic}. "
-                    f"Must be None, 'none', 'transform_4x4', 'color_rgba4b', 'color_rgb3f', etc."
-                )
+        # Layout-compatible rules: semantic → (source_dtype code/bits, trailing_shape_dims, target_lanes).
+        _LAYOUT_RULES = {
+            bindings.OVRTX_SEMANTIC_XFORM_MAT4x4: (
+                DLDataType(code=DLDataTypeCode.kDLFloat, bits=64, lanes=1),
+                (4, 4),
+                16,
+            ),
+        }
 
-        # 2. Get inferred dtype for semantic (if any)
-        if semantic_constant == bindings.OVRTX_SEMANTIC_TRANSFORM_4x4:
-            inferred_dtype = DLDataType(code=2, bits=64, lanes=16)  # Matrix4d: 16 doubles
-        elif semantic_constant == bindings.OVRTX_SEMANTIC_COLOR_RGBA4b:
-            inferred_dtype = DLDataType(code=1, bits=8, lanes=4)  # RGBA: 4 uint8
-        elif semantic_constant == bindings.OVRTX_SEMANTIC_COLOR_RGB3f:
-            inferred_dtype = DLDataType(code=2, bits=32, lanes=3)  # RGB: 3 floats
-        else:
-            inferred_dtype = None  # NONE - user must provide dtype
+        if (rule := _LAYOUT_RULES.get(semantic_constant)) is None:
+            return tensor  # No rules for NONE or unknown semantics
 
-        # 3. Resolve: use inferred, validate if both, or require user-provided
+        source_dtype, trailing_dims, target_lanes = rule
+        expected_ndim = 1 + len(trailing_dims)
+
+        # Pass-through: tensor already has the canonical multi-lane dtype (e.g. shape (N,) lanes=16).
+        if tensor.dtype.lanes == target_lanes:
+            return tensor
+
+        # Pass-through: layout-compatible (lanes=1, shape (N, 4, 4)). C API accepts this directly.
+        if tensor.dtype.lanes != 1:
+            return tensor
+
+        if tensor.dtype.code.value != source_dtype.code.value or tensor.dtype.bits != source_dtype.bits:
+            return tensor  # Let _resolve_semantic_and_dtype catch the mismatch
+
+        if tensor.shape is not None and tensor.ndim == expected_ndim:
+            actual_trailing = tuple(tensor.shape[1 + i] for i in range(len(trailing_dims)))
+            if actual_trailing == trailing_dims:
+                return tensor  # Pass through to C layout-compatible path (keeps strides)
+
+        _shape_str = "unknown" if tensor.shape is None else str(tuple(tensor.shape[i] for i in range(tensor.ndim)))
+        _expected_shape = "(N, " + ", ".join(str(d) for d in trailing_dims) + ")"
+        raise ValueError(
+            f"write_attribute: tensor shape {_shape_str} does not match expected shape "
+            f"{_expected_shape} for this semantic. Provide a tensor with the correct shape."
+        )
+
+    @staticmethod
+    def _is_string_semantic(semantic: int) -> bool:
+        """Return True if the semantic represents a string type (token or path)."""
+        return semantic in (Semantic.TOKEN_STRING, Semantic.PATH_STRING)
+
+    @staticmethod
+    def _is_layout_compatible_semantic(semantic: int) -> bool:
+        """Return True if the semantic allows layout-compatible tensor input (same code/bits, component count may differ)."""
+        return semantic == Semantic.XFORM_MAT4x4
+
+    @staticmethod
+    def _strings_to_dltensor(strings: list[str]) -> DLTensor:
+        """Convert a list of Python strings to a DLTensor of ovx_string_t structs.
+
+        Each string is encoded as UTF-8 and stored in an ovx_string_t (ptr + length).
+        The resulting DLTensor has dtype (kDLUInt, 128, 1) matching sizeof(ovx_string_t).
+
+        Args:
+            strings: List of Python strings to convert.
+
+        Returns:
+            DLTensor wrapping a contiguous array of ovx_string_t. Internal storage
+            (byte buffers and shape array) is kept alive via _string_conversion_storage.
+        """
+        n = len(strings)
+        string_array = (bindings.ovx_string_t * n)()
+        for i, s in enumerate(strings):
+            string_array[i] = bindings.ovx_string_t(s)
+
+        shape_array = (ctypes.c_int64 * 1)(n)
+
+        tensor = DLTensor(
+            data=ctypes.cast(string_array, ctypes.c_void_p),
+            device=DLDevice(device_type=DLDeviceType.kDLCPU, device_id=0),
+            ndim=1,
+            dtype=DLDataType(code=DLDataTypeCode.kDLUInt, bits=128, lanes=1),
+            shape=ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64)),
+            strides=None,
+            byte_offset=0,
+        )
+        # Keep ctypes arrays alive for the lifetime of the DLTensor
+        tensor._string_conversion_storage = {"string_array": string_array, "shape_array": shape_array}
+
+        return tensor
+
+    def _resolve_semantic_and_dtype(
+        self, semantic: Semantic, dtype: Optional[DLDataType], context: str = "operation"
+    ) -> tuple[int, DLDataType]:
+        """Resolve dtype from semantic, validating any user-provided dtype.
+
+        Semantics imply specific dtype requirements determined by the C library's
+        internal representation. When a semantic is provided, the dtype is inferred
+        automatically; user-provided dtypes are validated against the expected type.
+
+        Args:
+            semantic: Semantic enum value.
+            dtype: User-provided dtype (optional if semantic implies dtype).
+            context: Context string for error messages.
+
+        Returns:
+            Tuple of (semantic_constant, semantic_dtype).
+
+        Raises:
+            ValueError: If dtype is required but not provided,
+                       or if provided dtype doesn't match semantic.
+        """
+        if semantic == Semantic.XFORM_MAT4x4:
+            inferred_dtype = DLDataType(code=DLDataTypeCode.kDLFloat, bits=64, lanes=16)
+            layout_compatible = True  # C API accepts (code, bits) match; lanes may differ (e.g. 1 with shape (N,4,4))
+        elif semantic in (Semantic.TOKEN_STRING, Semantic.PATH_STRING):
+            inferred_dtype = DLDataType(code=DLDataTypeCode.kDLUInt, bits=128, lanes=1)
+            layout_compatible = False
+        else:
+            inferred_dtype = None  # NONE — user must provide dtype
+            layout_compatible = False
+
         if inferred_dtype is not None:
-            # Use .value for code (DLDataTypeCode subclass), direct comparison for bits/lanes
-            if dtype is not None and (
-                dtype.code.value != inferred_dtype.code.value
-                or dtype.bits != inferred_dtype.bits
-                or dtype.lanes != inferred_dtype.lanes
-            ):
-                raise ValueError(
-                    f"{context}: provided dtype (code={dtype.code}, bits={dtype.bits}, lanes={dtype.lanes}) "
-                    f"doesn't match required dtype for semantic '{semantic}' "
-                    f"(code={inferred_dtype.code}, bits={inferred_dtype.bits}, lanes={inferred_dtype.lanes})"
-                )
+            if dtype is not None:
+                code_bits_ok = dtype.code.value == inferred_dtype.code.value and dtype.bits == inferred_dtype.bits
+                if layout_compatible:
+                    if not code_bits_ok:
+                        raise ValueError(
+                            f"{context}: provided dtype (code={dtype.code}, bits={dtype.bits}, "
+                            f"components={dtype.lanes}) must match scalar type for {semantic!r} "
+                            f"(code={inferred_dtype.code}, bits={inferred_dtype.bits}); "
+                            f"component count may differ for layout-compatible input "
+                            f"(e.g. shape (N, 4, 4) with 1 component)."
+                        )
+                else:
+                    if not (code_bits_ok and dtype.lanes == inferred_dtype.lanes):
+                        raise ValueError(
+                            f"{context}: provided dtype (code={dtype.code}, bits={dtype.bits}, "
+                            f"components={dtype.lanes}) doesn't match required dtype for {semantic!r} "
+                            f"(code={inferred_dtype.code}, bits={inferred_dtype.bits}, "
+                            f"components={inferred_dtype.lanes})"
+                        )
             semantic_dtype = inferred_dtype
         elif dtype is None:
-            raise ValueError(f"{context}: dtype is required when semantic is None")
+            raise ValueError(f"{context}: dtype is required when semantic is Semantic.NONE")
         else:
             semantic_dtype = dtype
 
-        return (semantic_constant, semantic_dtype)
+        return (semantic, semantic_dtype)
 
-    def _build_binding_desc(
-        self,
-        prim_paths: List[str],
-        attribute_name: str,
-        dtype: DLDataType,
-        semantic: int,
-        prim_mode: str = "existing_only",
-        is_array: bool = False,
-    ) -> _AttributeBindingDescStorage:
-        """Construct binding descriptor from Python params.
+    _DTYPE_MAP = {
+        "float16": (DLDataTypeCode.kDLFloat, 16),
+        "float32": (DLDataTypeCode.kDLFloat, 32),
+        "float64": (DLDataTypeCode.kDLFloat, 64),
+        "int8": (DLDataTypeCode.kDLInt, 8),
+        "int16": (DLDataTypeCode.kDLInt, 16),
+        "int32": (DLDataTypeCode.kDLInt, 32),
+        "int64": (DLDataTypeCode.kDLInt, 64),
+        "uint8": (DLDataTypeCode.kDLUInt, 8),
+        "uint16": (DLDataTypeCode.kDLUInt, 16),
+        "uint32": (DLDataTypeCode.kDLUInt, 32),
+        "uint64": (DLDataTypeCode.kDLUInt, 64),
+        "bool": (DLDataTypeCode.kDLBool, 8),
+    }
 
-        Args:
-            prim_paths: List of prim paths
-            attribute_name: Attribute name
-            dtype: DLDataType for the attribute
-            semantic: Semantic constant
-            prim_mode: Prim mode string
-            is_array: True for array attributes (e.g., float3[] points)
+    _PYTHON_BUILTIN_DTYPE_MAP = {
+        float: "float64",
+        int: "int64",
+        bool: "bool",
+    }
 
-        Returns:
-            _AttributeBindingDescStorage instance that keeps all C structures alive
-        """
-        return _AttributeBindingDescStorage(
-            prim_paths=prim_paths,
-            attribute_name=attribute_name,
-            dtype=dtype,
-            semantic=semantic,
-            prim_mode=prim_mode,
-            is_array=is_array,
-        )
+    _KIND_MAP = {
+        "f": DLDataTypeCode.kDLFloat,
+        "i": DLDataTypeCode.kDLInt,
+        "u": DLDataTypeCode.kDLUInt,
+        "b": DLDataTypeCode.kDLBool,
+    }
 
-    def _build_input_buffer(
-        self, dl_tensors: List[DLTensor], dirty_bits: Optional[bytes] = None
-    ) -> _InputBufferStorage:
-        """Construct input buffer from DLTensor list.
+    @staticmethod
+    def _resolve_new_dtype_and_shape(
+        dtype: Any, shape: Optional[tuple], context: str = "operation"
+    ) -> tuple[int, DLDataType, Optional[tuple]]:
+        """Translate new-style dtype + shape to (semantic_constant, DLDataType, shape).
 
         Args:
-            dl_tensors: List of DLTensor objects (one per prim for array attributes, single tensor otherwise)
-            dirty_bits: Optional dirty bit array for selective updates
+            dtype: Element type. Accepts string names (``"float32"``, ``"token"``, ``"path"``),
+                NumPy dtypes (``np.float32``, ``np.dtype("float64")``), any object with
+                ``.kind``/``.itemsize`` attributes (CuPy, JAX dtypes), or Python built-ins
+                (``float``, ``int``).
+            shape: Optional element shape tuple (e.g. (3,) for float3, (4, 4) for matrix4d).
+            context: Context string for error messages.
 
         Returns:
-            _InputBufferStorage instance that keeps all C structures alive
+            Tuple of (semantic_constant, resolved_DLDataType, shape).
         """
-        return _InputBufferStorage(dl_tensors, dirty_bits=dirty_bits)
-
-    def _build_mapping_desc(self, device: str, device_id: int = 0) -> bindings.ovrtx_mapping_desc_t:
-        """Construct mapping descriptor from device string.
-
-        Args:
-            device: Device string ("cpu" or "cuda")
-            device_id: Device ID (default 0, typically GPU index for CUDA)
-
-        Returns:
-            ovrtx_mapping_desc_t with device_type and device_id
-
-        Raises:
-            ValueError: If device string is invalid
-        """
-        device_normalized = device.strip().lower()
-        if device_normalized == "cpu":
-            device_type = 1  # kDLCPU
-        elif device_normalized == "cuda":
-            device_type = 2  # kDLCUDA
+        if isinstance(dtype, str):
+            if dtype == "token":
+                return (Semantic.TOKEN_STRING, DLDataType(code=DLDataTypeCode.kDLUInt, bits=128, lanes=1), None)
+            if dtype == "path":
+                return (Semantic.PATH_STRING, DLDataType(code=DLDataTypeCode.kDLUInt, bits=128, lanes=1), None)
+            dtype_str = dtype
+        elif dtype in Renderer._PYTHON_BUILTIN_DTYPE_MAP:
+            dtype_str = Renderer._PYTHON_BUILTIN_DTYPE_MAP[dtype]
+        elif isinstance(dtype, type) and Renderer._DTYPE_MAP.get(getattr(dtype, "__name__", "")) is not None:
+            dtype_str = dtype.__name__
         else:
-            raise ValueError(f"Invalid device: {device}. Must be 'cpu' or 'cuda'")
+            # Duck-type: np.dtype instance (has .kind + .itemsize directly)
+            if hasattr(dtype, "kind") and hasattr(dtype, "itemsize"):
+                code = Renderer._KIND_MAP.get(dtype.kind)
+                if code is None:
+                    raise ValueError(
+                        f"{context}: dtype={dtype!r} is not a supported numeric type. "
+                        f"Use a float, int, uint, or bool dtype (e.g. np.float32, np.int32, np.uint8, np.bool_)."
+                    )
+                bits = dtype.itemsize * 8
+                lanes = math.prod(shape) if shape else 1
+                return (Semantic.NONE, DLDataType(code=code, bits=bits, lanes=lanes), shape if shape else None)
+            # Duck-type: objects with a .dtype property (e.g. numpy scalar type instances)
+            if hasattr(dtype, "dtype") and hasattr(dtype.dtype, "kind") and hasattr(dtype.dtype, "itemsize"):
+                code = Renderer._KIND_MAP.get(dtype.dtype.kind)
+                if code is None:
+                    raise ValueError(
+                        f"{context}: dtype={dtype!r} is not a supported numeric type. "
+                        f"Use a float, int, uint, or bool dtype (e.g. np.float32, np.int32, np.uint8, np.bool_)."
+                    )
+                bits = dtype.dtype.itemsize * 8
+                lanes = math.prod(shape) if shape else 1
+                return (Semantic.NONE, DLDataType(code=code, bits=bits, lanes=lanes), shape if shape else None)
+            dtype_str = str(dtype)
 
-        return bindings.ovrtx_mapping_desc_t(device_type=device_type, device_id=device_id)
+        entry = Renderer._DTYPE_MAP.get(dtype_str)
+        if entry is None:
+            raise ValueError(
+                f"{context}: unrecognized dtype={dtype!r}. Use a numpy dtype, Python built-in (float, int), "
+                f"or a string name ('float32', 'int32', 'token', 'path', etc.)."
+            )
+        code, bits = entry
+        lanes = math.prod(shape) if shape else 1
+        return (Semantic.NONE, DLDataType(code=code, bits=bits, lanes=lanes), shape if shape else None)
 
-    def _create_semantic_aware_dltensor(self, original_dl_tensor: DLTensor, semantic: int) -> DLTensor:
-        """Create semantic-aware reshaped DLTensor view optimized for NumPy users.
+    def _create_semantic_aware_dltensor(
+        self, original_dl_tensor: DLTensor, semantic: int, element_shape: Optional[tuple] = None
+    ) -> DLTensor:
+        """Create reshaped DLTensor view for interop-friendly consumption.
 
-        Creates a new DLTensor with reshaped dimensions based on semantic, pointing to
-        the same underlying memory (zero-copy view).
+        When ``element_shape`` is provided (new dtype/shape API path), reshapes
+        ``(N,)`` with ``K`` components to ``(N, *element_shape)`` with a scalar element.
+        When ``element_shape`` is None, applies semantic-specific reshaping
+        (XFORM_MAT4x4 → ``(N, 4, 4)``).
 
         Args:
-            original_dl_tensor: Original DLTensor from C API (e.g., shape[N] lanes=16 for Matrix4d)
-            semantic: Semantic constant (OVRTX_SEMANTIC_*)
+            original_dl_tensor: Original DLTensor from C API.
+            semantic: Semantic constant (OVRTX_SEMANTIC_*).
+            element_shape: Optional element shape from the new dtype/shape API.
 
         Returns:
-            Reshaped DLTensor view (e.g., shape[N,4,4] lanes=1 for Matrix4d)
-            For non-reshapable semantics, returns original tensor.
-
-        Note:
-            The returned DLTensor has _shape_storage attached to keep shape array alive.
+            Reshaped DLTensor view (zero-copy metadata change), or the original
+            tensor if no reshaping applies.
         """
-        # Get original shape
         if original_dl_tensor.ndim < 1 or original_dl_tensor.shape is None:
             return original_dl_tensor
 
         N = original_dl_tensor.shape[0]
         lanes = original_dl_tensor.dtype.lanes
 
-        # Matrix4d: shape[N] lanes=16 → shape[N,4,4] lanes=1
-        if semantic == bindings.OVRTX_SEMANTIC_TRANSFORM_4x4 and lanes == 16:
-            # Create new DLTensor with reshaped dimensions
+        # New path: reshape using stored element_shape
+        if element_shape is not None and lanes > 1:
+            new_dims = (N, *element_shape)
+            ndim = len(new_dims)
             reshaped = DLTensor()
-
-            # Copy basic fields
             reshaped.data = original_dl_tensor.data
             reshaped.device = original_dl_tensor.device
             reshaped.byte_offset = original_dl_tensor.byte_offset
-            reshaped.strides = None  # Contiguous
+            reshaped.strides = None
+            reshaped.ndim = ndim
+            shape_array = (ctypes.c_int64 * ndim)(*new_dims)
+            reshaped.shape = ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64))
+            reshaped.dtype.code = original_dl_tensor.dtype.code
+            reshaped.dtype.bits = original_dl_tensor.dtype.bits
+            reshaped.dtype.lanes = 1
+            reshaped._shape_storage = shape_array
+            return reshaped
 
-            # Reshape: (N,) lanes=16 → (N, 4, 4) lanes=1
+        # Semantic-specific path: XFORM_MAT4x4 reshape (N,) lanes=16 → (N, 4, 4) lanes=1
+        if semantic == bindings.OVRTX_SEMANTIC_XFORM_MAT4x4 and lanes == 16:
+            reshaped = DLTensor()
+            reshaped.data = original_dl_tensor.data
+            reshaped.device = original_dl_tensor.device
+            reshaped.byte_offset = original_dl_tensor.byte_offset
+            reshaped.strides = None
             reshaped.ndim = 3
             shape_array = (ctypes.c_int64 * 3)(N, 4, 4)
             reshaped.shape = ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64))
-
-            # Update dtype to have lanes=1
             reshaped.dtype.code = original_dl_tensor.dtype.code
             reshaped.dtype.bits = original_dl_tensor.dtype.bits
             reshaped.dtype.lanes = 1
-
-            # Attach shape array to keep it alive (Python attribute injection)
             reshaped._shape_storage = shape_array
-
             return reshaped
 
-        # RGBA color: shape[N] lanes=4 → shape[N,4] lanes=1
-        elif semantic == bindings.OVRTX_SEMANTIC_COLOR_RGBA4b and lanes == 4:
-            reshaped = DLTensor()
-
-            reshaped.data = original_dl_tensor.data
-            reshaped.device = original_dl_tensor.device
-            reshaped.byte_offset = original_dl_tensor.byte_offset
-            reshaped.strides = None
-
-            reshaped.ndim = 2
-            shape_array = (ctypes.c_int64 * 2)(N, 4)
-            reshaped.shape = ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64))
-
-            reshaped.dtype.code = original_dl_tensor.dtype.code
-            reshaped.dtype.bits = original_dl_tensor.dtype.bits
-            reshaped.dtype.lanes = 1
-
-            reshaped._shape_storage = shape_array
-
-            return reshaped
-
-        # RGB color: shape[N] lanes=3 → shape[N,3] lanes=1
-        elif semantic == bindings.OVRTX_SEMANTIC_COLOR_RGB3f and lanes == 3:
-            reshaped = DLTensor()
-
-            reshaped.data = original_dl_tensor.data
-            reshaped.device = original_dl_tensor.device
-            reshaped.byte_offset = original_dl_tensor.byte_offset
-            reshaped.strides = None
-
-            reshaped.ndim = 2
-            shape_array = (ctypes.c_int64 * 2)(N, 3)
-            reshaped.shape = ctypes.cast(shape_array, ctypes.POINTER(ctypes.c_int64))
-
-            reshaped.dtype.code = original_dl_tensor.dtype.code
-            reshaped.dtype.bits = original_dl_tensor.dtype.bits
-            reshaped.dtype.lanes = 1
-
-            reshaped._shape_storage = shape_array
-
-            return reshaped
-
-        # No reshaping needed for other semantics
         return original_dl_tensor
 
     def write_attribute(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        tensor: DLTensor,
-        semantic: Optional[str] = None,
+        tensor: Any,
+        semantic: Semantic = Semantic.NONE,
         dirty_bits: Optional[bytes] = None,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> None:
         """Write scalar attribute data synchronously.
 
-        For repeated writes to the same attribute, consider using bind_attribute()
-        followed by binding.write() for better performance.
+        Pass data directly — the element type and component count are inferred
+        automatically from the input:
+
+        - **Tensor input** (NumPy, Warp, or any ``__dlpack__``-compatible
+          object): the element type is derived from the array's dtype and
+          shape. For example, a ``float32`` array with shape ``(N, 3)``
+          is interpreted as a 3-component float attribute.
+        - **String input** (``list[str]``): automatically written as a token
+          string attribute. One string per prim.
+
+        For repeated writes to the same attribute, consider using
+        ``bind_attribute()`` followed by ``binding.write()`` for better
+        performance.
 
         Args:
             prim_paths: List of prim paths to write to.
             attribute_name: Name of the attribute.
-            tensor: Single DLTensor with one element per prim.
-            semantic: Semantic string ("transform_4x4", "color_rgba4b", "color_rgb3f").
-                If provided, dtype is inferred and validated against tensor's dtype.
+            tensor: A NumPy array, Warp array, or any ``__dlpack__``-compatible
+                object. One element per prim.
+                For token strings, pass a ``list[str]`` instead.
+            semantic: Optional attribute semantic (e.g.,
+                ``Semantic.XFORM_MAT4x4``). When omitted (default), the
+                element type is inferred from the input data.
             dirty_bits: Optional dirty bit array for selective updates.
-            prim_mode: Prim mode ("existing_only", "must_exist", or "create_new").
+            prim_mode: Prim binding mode (e.g., ``PrimMode.EXISTING_ONLY``).
+            data_access: Data access mode. ``DataAccess.SYNC`` (default) copies
+                input data immediately so the caller's buffer can be reused
+                after this call returns. ``DataAccess.ASYNC`` references the
+                caller's buffer until the operation completes (zero-copy). Not
+                allowed with string data.
+            cuda_stream: CUDA stream handle (``int``) for GPU synchronization.
+            cuda_event: CUDA event handle (``int``) for GPU synchronization.
 
         Raises:
             RuntimeError: If renderer is invalid or write fails.
             ValueError: If invalid parameters.
+            TypeError: If tensor type is not supported, or if string data is
+                not a ``list[str]``.
 
         Example:
             ```python
-            matrix = Matrix4d()
-            matrix.SetIdentity()
-            renderer.write_attribute(
-                prim_paths=["/World/Cube"],
-                attribute_name="omni:fabric:worldMatrix",
-                tensor=matrix.to_dltensor(),
-                semantic="transform_4x4"
-            )
+            import numpy as np
+
+            # Tensor writes — just pass the array
+            points = np.random.randn(N, 3).astype(np.float32)
+            renderer.write_attribute(prim_paths, "points", points)
+
+            matrices = np.tile(np.eye(4, dtype=np.float64), (N, 1, 1))
+            renderer.write_attribute(prim_paths, "xformOp:transform", matrices)
+
+            # Token strings — auto-detected from list[str]
+            renderer.write_attribute(prim_paths, "displayName", ["Cube", "Sphere"])
             ```
         """
         self.write_attribute_async(
@@ -1147,33 +1289,62 @@ class Renderer:
             semantic=semantic,
             dirty_bits=dirty_bits,
             prim_mode=prim_mode,
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
         ).wait()
 
     def write_array_attribute(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        tensors: List[DLTensor],
+        tensors: List[Any],
+        semantic: Semantic = Semantic.NONE,
+        is_token: bool = False,
         dirty_bits: Optional[bytes] = None,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> None:
         """Write array attribute data synchronously.
 
-        Array attributes (e.g., float3[] points) may have variable lengths per prim.
-        Each tensor in the list corresponds to one prim.
+        Pass data directly — the element type and component count are inferred
+        automatically from the input:
+
+        - **Tensor input**: Each tensor corresponds to one prim. The element
+          type is derived from the array's dtype and shape. Lengths may differ
+          per prim.
+        - **String input** (``list[list[str]]``): defaults to path/relationship
+          arrays. Set ``is_token=True`` for token arrays (e.g.,
+          ``xformOpOrder``, ``apiSchemas``).
 
         Args:
             prim_paths: List of prim paths to write to.
             attribute_name: Name of the array attribute.
-            tensors: List of DLTensor, one per prim. Lengths may differ but
-                element dtype must match the USD attribute schema. Must be CPU
-                tensors; for GPU data, copy to CPU first (e.g., ``arr.numpy()``).
+            tensors: List of tensors (NumPy arrays, Warp arrays, or any
+                ``__dlpack__``-compatible object), one per prim. Lengths may
+                differ but element dtype must match the USD attribute schema.
+                For string arrays, pass ``list[list[str]]`` instead.
+            semantic: Optional attribute semantic (e.g.,
+                ``Semantic.PATH_STRING``). When omitted (default), the
+                element type is inferred from the input data.
+            is_token: When passing ``list[list[str]]`` data, set ``True`` to write
+                token arrays instead of path/relationship arrays. Ignored for
+                tensor data. Default ``False``.
             dirty_bits: Optional dirty bit array for selective updates.
-            prim_mode: Prim mode ("existing_only", "must_exist", or "create_new").
+            prim_mode: Prim binding mode (e.g., ``PrimMode.EXISTING_ONLY``).
+            data_access: Data access mode. ``DataAccess.SYNC`` (default) copies input
+                data immediately. ``DataAccess.ASYNC`` references the caller's buffer
+                until the operation completes (zero-copy). Not allowed with string data.
+            cuda_stream: CUDA stream handle (``int``) for GPU synchronization.
+            cuda_event: CUDA event handle (``int``) for GPU synchronization.
 
         Raises:
             RuntimeError: If renderer is invalid or write fails.
             ValueError: If invalid parameters or dtype mismatch.
+            TypeError: If any tensor type is not supported, or if string data
+                is not ``list[str]``.
 
         Note:
             Tensor dtype must exactly match the USD attribute's element type:
@@ -1182,62 +1353,70 @@ class Renderer:
             - ``float3[]`` → ``np.float32`` with shape ``(N, 3)``
             - ``double3[]`` → ``np.float64`` with shape ``(N, 3)``
 
-            Using the wrong dtype (e.g., numpy's default float64 for a float3
-            attribute) will cause an element size mismatch error.
-
         Example:
             ```python
-            from ovrtx._src.dlpack import DLTensor
-            # int[] attribute - use int32
+            import numpy as np
+
+            # Tensor array write
             face_counts = np.array([4, 4, 4], dtype=np.int32)
-            renderer.write_array_attribute(
-                prim_paths=["/World/Mesh"],
-                attribute_name="faceVertexCounts",
-                tensors=[DLTensor.from_dlpack(face_counts)]
-            )
-            # float3[] attribute - use float32 with shape (N, 3)
-            points = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
-            renderer.write_array_attribute(
-                prim_paths=["/World/Mesh"],
-                attribute_name="points",
-                tensors=[DLTensor.from_dlpack(points)]
-            )
+            renderer.write_array_attribute(["/World/Mesh"], "faceVertexCounts", [face_counts])
+
+            # Relationship arrays — default for list[list[str]]
+            renderer.write_array_attribute(["/World/Mesh"], "material:binding",
+                [["path1", "path2"]])
+
+            # Token arrays — explicit is_token override
+            renderer.write_array_attribute(["/World/Mesh"], "xformOpOrder",
+                [["xformOp:translate", "xformOp:rotateXYZ"]], is_token=True)
             ```
         """
         self.write_array_attribute_async(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
             tensors=tensors,
+            semantic=semantic,
+            is_token=is_token,
             dirty_bits=dirty_bits,
             prim_mode=prim_mode,
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
         ).wait()
 
     def _write_attribute_by_binding(
-        self, binding: AttributeBinding, tensors: List[DLTensor], dirty_bits: Optional[bytes] = None
+        self,
+        binding: AttributeBinding,
+        tensors: List[Any],
+        dirty_bits: Optional[bytes] = None,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> None:
         """Write attribute data using a binding handle synchronously (internal)."""
         self._write_attribute_by_binding_async(
-            binding=binding, tensors=tensors, dirty_bits=dirty_bits, data_access="sync"
+            binding=binding,
+            tensors=tensors,
+            dirty_bits=dirty_bits,
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
         ).wait()
 
     def write_attribute_async(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        tensor: DLTensor,
-        semantic: Optional[str] = None,
+        tensor: Any,
+        semantic: Semantic = Semantic.NONE,
         dirty_bits: Optional[bytes] = None,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> Operation[None]:
         """Write scalar attribute data asynchronously.
 
-        Args:
-            prim_paths: List of prim paths to write to.
-            attribute_name: Name of the attribute.
-            tensor: Single DLTensor with one element per prim.
-            semantic: Semantic string (dtype inferred if provided).
-            dirty_bits: Optional dirty bit array for selective updates.
-            prim_mode: Prim mode string.
+        See :meth:`write_attribute` for full documentation and examples.
 
         Returns:
             Operation for async control (yields None on completion).
@@ -1250,55 +1429,58 @@ class Renderer:
             dirty_bits=dirty_bits,
             prim_mode=prim_mode,
             is_array=False,
-            data_access="sync",
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
         )
 
     def write_array_attribute_async(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        tensors: List[DLTensor],
+        tensors: List[Any],
+        semantic: Semantic = Semantic.NONE,
+        is_token: bool = False,
         dirty_bits: Optional[bytes] = None,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> Operation[None]:
         """Write array attribute data asynchronously.
 
-        Args:
-            prim_paths: List of prim paths to write to.
-            attribute_name: Name of the array attribute.
-            tensors: List of DLTensor, one per prim. Element dtype must match the
-                USD attribute schema. Must be CPU tensors; for GPU data, copy to
-                CPU first (e.g., ``arr.numpy()``).
-            dirty_bits: Optional dirty bit array for selective updates.
-            prim_mode: Prim mode string.
+        See :meth:`write_array_attribute` for full documentation and examples.
 
         Returns:
             Operation for async control (yields None on completion).
-
-        See Also:
-            :meth:`write_array_attribute` for dtype matching requirements.
         """
         return self._write_attribute_internal(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
             tensors=tensors,
-            semantic=None,
+            semantic=semantic,
+            is_token=is_token,
             dirty_bits=dirty_bits,
             prim_mode=prim_mode,
             is_array=True,
-            data_access="sync",
+            data_access=data_access,
+            cuda_stream=cuda_stream,
+            cuda_event=cuda_event,
         )
 
     def _write_attribute_internal(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        tensors: List[DLTensor],
-        semantic: Optional[str],
+        tensors: List[Any],
+        semantic: Semantic,
         dirty_bits: Optional[bytes],
-        prim_mode: str,
+        prim_mode: PrimMode,
         is_array: bool,
-        data_access: str = "sync",
+        is_token: bool = False,
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> Operation[None]:
         """Internal: Write attribute data (shared implementation for scalar and array)."""
         if self._handle is None:
@@ -1307,65 +1489,140 @@ class Renderer:
         if not tensors:
             raise ValueError("tensors list cannot be empty")
 
-        # Build input buffer from DLTensor list
-        input_storage = self._build_input_buffer(tensors, dirty_bits=dirty_bits)
-
-        # Extract dtype from first tensor and validate all tensors have same dtype
-        tensor_dtype = tensors[0].dtype
-        for i, t in enumerate(tensors[1:], start=1):
-            if (
-                t.dtype.code.value != tensor_dtype.code.value
-                or t.dtype.bits != tensor_dtype.bits
-                or t.dtype.lanes != tensor_dtype.lanes
-            ):
+        if semantic != Semantic.NONE:
+            # Explicit semantic path: resolve dtype from the semantic constant
+            if semantic == Semantic.PATH_STRING and not is_array:
                 raise ValueError(
-                    f"All tensors must have the same dtype. "
-                    f"tensors[0] has dtype (code={tensor_dtype.code.value}, bits={tensor_dtype.bits}, lanes={tensor_dtype.lanes}), "
-                    f"but tensors[{i}] has dtype (code={t.dtype.code.value}, bits={t.dtype.bits}, lanes={t.dtype.lanes})"
+                    "Semantic.PATH_STRING requires write_array_attribute (is_array=True). "
+                    "Use write_array_attribute(semantic=Semantic.PATH_STRING, ...) instead of write_attribute."
                 )
 
-        # Parse semantic and resolve/validate dtype against tensor's dtype
-        semantic_constant, semantic_dtype = self._resolve_semantic_and_dtype(
-            semantic, tensor_dtype, context="write_attribute"
+            if self._is_string_semantic(semantic) and data_access == DataAccess.ASYNC:
+                raise ValueError("String attributes (token, path) require DataAccess.SYNC")
+
+            if self._is_string_semantic(semantic):
+                dl_tensors = []
+                for i, t in enumerate(tensors):
+                    if not isinstance(t, list) or not all(isinstance(s, str) for s in t):
+                        raise TypeError(
+                            f"tensors[{i}]: expected a list of strings for semantic {semantic!r}, "
+                            f"got {type(t).__name__}"
+                        )
+                    dl_tensors.append(self._strings_to_dltensor(t))
+                tensors = dl_tensors
+            else:
+                tensors = [
+                    self._normalize_tensor_for_write(
+                        semantic, t if isinstance(t, DLTensor) else DLTensor.from_dlpack(t)
+                    )
+                    for t in tensors
+                ]
+
+            tensor_dtype = tensors[0].dtype
+            for i, t in enumerate(tensors[1:], start=1):
+                if (
+                    t.dtype.code.value != tensor_dtype.code.value
+                    or t.dtype.bits != tensor_dtype.bits
+                    or t.dtype.lanes != tensor_dtype.lanes
+                ):
+                    raise ValueError(
+                        f"All tensors must have the same element type. "
+                        f"tensors[0] has (code={tensor_dtype.code.value}, bits={tensor_dtype.bits}, "
+                        f"components={tensor_dtype.lanes}), but tensors[{i}] has "
+                        f"(code={t.dtype.code.value}, bits={t.dtype.bits}, components={t.dtype.lanes})"
+                    )
+
+            resolved_semantic, semantic_dtype = self._resolve_semantic_and_dtype(
+                semantic, tensor_dtype, context="write_attribute"
+            )
+        else:
+            # New path: auto-detect input type
+            first = tensors[0]
+
+            if isinstance(first, list) and all(isinstance(s, str) for s in first):
+                # String input
+                if data_access == DataAccess.ASYNC:
+                    raise ValueError("String data requires DataAccess.SYNC")
+
+                if not is_array:
+                    resolved_semantic = Semantic.TOKEN_STRING
+                else:
+                    resolved_semantic = Semantic.TOKEN_STRING if is_token else Semantic.PATH_STRING
+
+                dl_tensors = []
+                for i, t in enumerate(tensors):
+                    if not isinstance(t, list) or not all(isinstance(s, str) for s in t):
+                        raise TypeError(
+                            f"tensors[{i}]: expected a list of strings (all elements must be list[str]), "
+                            f"got {type(t).__name__}"
+                        )
+                    dl_tensors.append(self._strings_to_dltensor(t))
+                tensors = dl_tensors
+                semantic_dtype = DLDataType(code=DLDataTypeCode.kDLUInt, bits=128, lanes=1)
+            else:
+                # Tensor / __dlpack__ input — infer component count from shape
+                dl_tensors = [t if isinstance(t, DLTensor) else DLTensor.from_dlpack(t) for t in tensors]
+                tensors = dl_tensors
+
+                ref_tensor = tensors[0]
+                ref_dtype = ref_tensor.dtype
+
+                for i, t in enumerate(tensors[1:], start=1):
+                    if (
+                        t.dtype.code.value != ref_dtype.code.value
+                        or t.dtype.bits != ref_dtype.bits
+                        or t.dtype.lanes != ref_dtype.lanes
+                    ):
+                        raise ValueError(
+                            f"All tensors must have the same element type. "
+                            f"tensors[0] has (code={ref_dtype.code.value}, bits={ref_dtype.bits}, "
+                            f"components={ref_dtype.lanes}), but tensors[{i}] has "
+                            f"(code={t.dtype.code.value}, bits={t.dtype.bits}, components={t.dtype.lanes})"
+                        )
+
+                # Infer component count from trailing shape dimensions and tensor lanes.
+                # NumPy exports lanes=1 with shape encoding (e.g. (N,3) float32 → lanes=1).
+                # Warp exports structured types with lanes>1 (e.g. mat44d → lanes=16, shape=(N,)).
+                # Multiplying accounts for both: 1*3=3 for NumPy, 16*1=16 for Warp mat44d.
+                if ref_tensor.ndim >= 2 and ref_tensor.shape is not None:
+                    trailing_dims = math.prod(ref_tensor.shape[i] for i in range(1, ref_tensor.ndim))
+                else:
+                    trailing_dims = 1
+
+                semantic_dtype = DLDataType(
+                    code=ref_dtype.code, bits=ref_dtype.bits, lanes=ref_dtype.lanes * trailing_dims
+                )
+                resolved_semantic = Semantic.NONE
+
+        input_storage = _InputBufferStorage(
+            tensors, dirty_bits=dirty_bits, cuda_stream=cuda_stream, cuda_event=cuda_event
         )
 
-        # Build binding descriptor
-        binding_storage = self._build_binding_desc(
+        binding_storage = _AttributeBindingDescStorage(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
             dtype=semantic_dtype,
-            semantic=semantic_constant,
+            semantic=resolved_semantic,
             prim_mode=prim_mode,
             is_array=is_array,
         )
 
-        # Convert data_access string to enum
-        if data_access == "sync":
-            data_access_enum = bindings.OVRTX_DATA_ACCESS_SYNC
-        elif data_access == "async":
-            data_access_enum = bindings.OVRTX_DATA_ACCESS_ASYNC
-        else:
-            raise ValueError(f"Invalid data_access: {data_access}. Must be 'sync' or 'async'")
-
-        # Call C API
         result = self._bindings.write_attribute(
             self._handle,
             binding_storage.binding_desc_or_handle,
             input_storage.input_buffer,
-            bindings.ovrtx_data_access_t(data_access_enum),
+            bindings.ovrtx_data_access_t(data_access),
         )
 
         if result.status != bindings.OVRTX_API_SUCCESS:
             error_msg = self._bindings.get_last_error() or "Unknown error"
             raise RuntimeError(f"Failed to enqueue attribute write: {error_msg}")
 
-        # Create operation
         op = Operation(
             renderer=self, op_id=result.op_index.value, handle=None, operation_name=f"write_attribute({attribute_name})"
         )
 
-        # For ASYNC access, keep storage alive by attaching to Operation
-        if data_access == "async":
+        if data_access == DataAccess.ASYNC:
             op._storage_refs = [input_storage, binding_storage]
 
         return op
@@ -1373,23 +1630,28 @@ class Renderer:
     def _write_attribute_by_binding_async(
         self,
         binding: AttributeBinding,
-        tensors: List[DLTensor],
+        tensors: List[Any],
         dirty_bits: Optional[bytes] = None,
-        data_access: str = "sync",
+        data_access: DataAccess = DataAccess.SYNC,
+        cuda_stream: Optional[int] = None,
+        cuda_event: Optional[int] = None,
     ) -> Operation[None]:
         """Write attribute data using a binding handle asynchronously (returns Operation).
 
         Args:
-            binding: AttributeBinding from bind_attribute()
-            tensors: List of DLTensor objects
-            dirty_bits: Optional dirty bit array for selective updates
-            data_access: Data access mode ("sync" or "async")
+            binding: AttributeBinding from bind_attribute().
+            tensors: List of tensors (NumPy arrays, Warp arrays, or any
+                ``__dlpack__``-compatible objects).
+            dirty_bits: Optional dirty bit array for selective updates.
+            data_access: Data access mode (DataAccess.SYNC or DataAccess.ASYNC).
+            cuda_stream: Optional CUDA stream handle for synchronization.
+            cuda_event: Optional CUDA event handle for synchronization.
 
         Returns:
-            Operation for async control (yields None on completion)
+            Operation for async control (yields None on completion).
 
         Raises:
-            RuntimeError: If renderer is invalid or write fails
+            RuntimeError: If renderer is invalid or write fails.
         """
         if self._handle is None:
             raise RuntimeError("Renderer is not valid")
@@ -1397,7 +1659,27 @@ class Renderer:
         if not tensors:
             raise ValueError("tensors list cannot be empty")
 
-        # Validate all tensors have same dtype
+        if self._is_string_semantic(binding.semantic) and data_access == DataAccess.ASYNC:
+            raise ValueError("String attributes (token, path) require DataAccess.SYNC")
+
+        if self._is_string_semantic(binding.semantic):
+            dl_tensors = []
+            for i, t in enumerate(tensors):
+                if not isinstance(t, list) or not all(isinstance(s, str) for s in t):
+                    raise TypeError(
+                        f"tensors[{i}]: expected a list of strings for this string attribute binding, "
+                        f"got {type(t).__name__}"
+                    )
+                dl_tensors.append(self._strings_to_dltensor(t))
+            tensors = dl_tensors
+        else:
+            tensors = [
+                self._normalize_tensor_for_write(
+                    binding.semantic, t if isinstance(t, DLTensor) else DLTensor.from_dlpack(t)
+                )
+                for t in tensors
+            ]
+
         first_dtype = tensors[0].dtype
         for i, t in enumerate(tensors[1:], start=1):
             if (
@@ -1406,54 +1688,51 @@ class Renderer:
                 or t.dtype.lanes != first_dtype.lanes
             ):
                 raise ValueError(
-                    f"All tensors must have the same dtype. "
-                    f"tensors[0] has dtype (code={first_dtype.code.value}, bits={first_dtype.bits}, lanes={first_dtype.lanes}), "
-                    f"but tensors[{i}] has dtype (code={t.dtype.code.value}, bits={t.dtype.bits}, lanes={t.dtype.lanes})"
+                    f"All tensors must have the same element type. "
+                    f"tensors[0] has (code={first_dtype.code.value}, bits={first_dtype.bits}, "
+                    f"components={first_dtype.lanes}), but tensors[{i}] has "
+                    f"(code={t.dtype.code.value}, bits={t.dtype.bits}, components={t.dtype.lanes})"
                 )
 
-        # Validate tensor dtype matches binding's expected dtype
         expected_dtype = binding.dtype
-        if (
-            first_dtype.code.value != expected_dtype.code.value
-            or first_dtype.bits != expected_dtype.bits
-            or first_dtype.lanes != expected_dtype.lanes
-        ):
+        code_bits_ok = first_dtype.code.value == expected_dtype.code.value and first_dtype.bits == expected_dtype.bits
+        lanes_ok = first_dtype.lanes == expected_dtype.lanes
+        if self._is_layout_compatible_semantic(binding.semantic) or binding.shape is not None:
+            if not code_bits_ok:
+                raise ValueError(
+                    f"Tensor element type (code={first_dtype.code.value}, bits={first_dtype.bits}, "
+                    f"components={first_dtype.lanes}) must match binding's scalar type "
+                    f"(code={expected_dtype.code.value}, bits={expected_dtype.bits}); "
+                    f"component count may differ for layout-compatible input."
+                )
+        elif not (code_bits_ok and lanes_ok):
             raise ValueError(
-                f"Tensor dtype (code={first_dtype.code.value}, bits={first_dtype.bits}, lanes={first_dtype.lanes}) "
-                f"doesn't match binding's expected dtype "
-                f"(code={expected_dtype.code.value}, bits={expected_dtype.bits}, lanes={expected_dtype.lanes})"
+                f"Tensor element type (code={first_dtype.code.value}, bits={first_dtype.bits}, "
+                f"components={first_dtype.lanes}) doesn't match binding's expected type "
+                f"(code={expected_dtype.code.value}, bits={expected_dtype.bits}, "
+                f"components={expected_dtype.lanes})"
             )
 
-        # Build input buffer from DLTensor list
-        input_storage = self._build_input_buffer(tensors, dirty_bits=dirty_bits)
+        input_storage = _InputBufferStorage(
+            tensors, dirty_bits=dirty_bits, cuda_stream=cuda_stream, cuda_event=cuda_event
+        )
 
-        # Use persistent handle
         binding_desc_or_handle = bindings.ovrtx_binding_desc_or_handle_t(
-            binding_desc=bindings.ovrtx_binding_desc_t(),  # Empty descriptor
+            binding_desc=bindings.ovrtx_binding_desc_t(),
             binding_handle=bindings.ovrtx_attribute_binding_handle_t(binding.handle),
         )
 
-        # Convert data_access string to enum
-        if data_access == "sync":
-            data_access_enum = bindings.OVRTX_DATA_ACCESS_SYNC
-        elif data_access == "async":
-            data_access_enum = bindings.OVRTX_DATA_ACCESS_ASYNC
-        else:
-            raise ValueError(f"Invalid data_access: {data_access}. Must be 'sync' or 'async'")
-
-        # Call C API
         result = self._bindings.write_attribute(
             self._handle,
             binding_desc_or_handle,
             input_storage.input_buffer,
-            bindings.ovrtx_data_access_t(data_access_enum),
+            bindings.ovrtx_data_access_t(data_access),
         )
 
         if result.status != bindings.OVRTX_API_SUCCESS:
             error_msg = self._bindings.get_last_error() or "Unknown error"
             raise RuntimeError(f"Failed to enqueue attribute write: {error_msg}")
 
-        # Create operation
         op = Operation(
             renderer=self,
             op_id=result.op_index.value,
@@ -1461,8 +1740,7 @@ class Renderer:
             operation_name=f"write_attribute(handle={binding.handle})",
         )
 
-        # For ASYNC access, keep storage alive by attaching to Operation
-        if data_access == "async":
+        if data_access == DataAccess.ASYNC:
             op._storage_refs = [input_storage]
 
         return op
@@ -1471,55 +1749,85 @@ class Renderer:
         self,
         prim_paths: List[str],
         attribute_name: str,
-        semantic: Optional[str] = None,
-        dtype: Optional[DLDataType] = None,
-        prim_mode: str = "existing_only",
+        dtype: Any = None,
+        shape: Optional[tuple] = None,
+        semantic: Semantic = Semantic.NONE,
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
     ) -> "AttributeBinding[DLTensor]":
         """Create a persistent binding for scalar attribute writes.
 
         Creates a binding handle that can be reused for multiple write() calls,
         avoiding the overhead of recreating the binding descriptor each time.
 
+        Specify the attribute type using ``dtype`` and optionally ``shape``:
+
+        - **Tensor types**: ``dtype="float32", shape=(3,)`` for ``point3f``,
+          ``dtype="float64", shape=(4, 4)`` for ``matrix4d``, etc.
+        - **String types**: ``dtype="token"`` or ``dtype="path"``.
+        - **Scalars**: ``dtype="int32"`` (no shape needed).
+
         Args:
             prim_paths: List of prim paths.
             attribute_name: Name of the attribute.
-            semantic: Semantic string ("transform_4x4", "color_rgba4b", "color_rgb3f").
-                If provided, dtype is inferred automatically.
-            dtype: DLDataType for the attribute. Required only if semantic is None.
-            prim_mode: Prim mode ("existing_only", "must_exist", or "create_new").
+            dtype: Element type. Accepts string names (``"float32"``,
+                ``"float64"``, ``"int32"``, ``"token"``, ``"path"``),
+                NumPy dtypes (``np.float32``, ``np.dtype("float64")``),
+                any dtype object with ``.kind``/``.itemsize`` attributes
+                (CuPy, JAX), Python built-ins (``float``, ``int``), or a
+                ``DLDataType`` object.
+            shape: Element shape tuple (e.g. ``(3,)`` for 3-component vectors,
+                ``(4, 4)`` for matrices). Mandatory for multi-component types
+                when using numpy dtypes or string names. Omit for scalars.
+                Ignored for string types and ``DLDataType``.
+            semantic: Optional attribute semantic (e.g.,
+                ``Semantic.XFORM_MAT4x4``). Alternative to ``dtype``/``shape``
+                for specifying the attribute type.
+            prim_mode: Prim binding mode (e.g., ``PrimMode.EXISTING_ONLY``).
 
         Returns:
             AttributeBinding[DLTensor] for scalar attribute writes.
 
         Example:
             ```python
+            # String form — no imports needed for dtype specification:
             binding = renderer.bind_attribute(
-                prim_paths=["/World/Cube"],
-                attribute_name="omni:fabric:worldMatrix",
-                semantic="transform_4x4"
-            )
-            binding.write(matrix.to_dltensor())
-            binding.unbind()
+                ["/World/Cube"], "xformOp:transform",
+                dtype="float64", shape=(4, 4))
+
+            # NumPy dtype objects also work:
+            import numpy as np
+            binding = renderer.bind_attribute(
+                ["/World/Cube"], "visibility", dtype=np.int32)
             ```
         """
         return self.bind_attribute_async(
-            prim_paths=prim_paths, attribute_name=attribute_name, semantic=semantic, dtype=dtype, prim_mode=prim_mode
+            prim_paths=prim_paths,
+            attribute_name=attribute_name,
+            dtype=dtype,
+            shape=shape,
+            semantic=semantic,
+            prim_mode=prim_mode,
         ).wait()
 
     def bind_attribute_async(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        semantic: Optional[str] = None,
-        dtype: Optional[DLDataType] = None,
-        prim_mode: str = "existing_only",
+        dtype: Any = None,
+        shape: Optional[tuple] = None,
+        semantic: Semantic = Semantic.NONE,
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
     ) -> "Operation[AttributeBinding[DLTensor]]":
-        """Create a persistent binding for scalar attribute writes (async)."""
+        """Create a persistent binding for scalar attribute writes (async).
+
+        See :meth:`bind_attribute` for full documentation and examples.
+        """
         return self._bind_attribute_internal(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
-            semantic=semantic,
             dtype=dtype,
+            shape=shape,
+            semantic=semantic,
             prim_mode=prim_mode,
             is_array=False,
         )
@@ -1528,60 +1836,70 @@ class Renderer:
         self,
         prim_paths: List[str],
         attribute_name: str,
-        dtype: Optional[DLDataType] = None,
-        prim_mode: str = "existing_only",
+        dtype: Any = None,
+        shape: Optional[tuple] = None,
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
     ) -> "AttributeBinding[List[DLTensor]]":
         """Create a persistent binding for array attribute writes.
 
-        Array attributes (e.g., float3[] points) may have variable lengths per prim.
-        The binding locks in the element dtype; subsequent writes can have varying
-        tensor lengths but must use the same element type.
+        Array attributes (e.g., ``float3[] points``) may have variable lengths
+        per prim. The binding locks in the element dtype; subsequent writes can
+        have varying tensor lengths but must use the same element type.
 
         Args:
             prim_paths: List of prim paths.
             attribute_name: Name of the array attribute.
-            dtype: DLDataType for the attribute elements. Must match the USD
-                attribute schema (e.g., int32 for ``int[]``, float32 for ``float3[]``).
-            prim_mode: Prim mode ("existing_only", "must_exist", or "create_new").
+            dtype: Element type. Accepts string names (``"float32"``,
+                ``"float64"``, ``"int32"``, ``"token"``, ``"path"``),
+                NumPy dtypes (``np.float32``, ``np.dtype("float64")``),
+                any dtype object with ``.kind``/``.itemsize`` attributes
+                (CuPy, JAX), Python built-ins (``float``, ``int``), or a
+                ``DLDataType`` object.
+            shape: Element shape tuple (e.g. ``(3,)`` for ``float3[]``).
+                Mandatory for multi-component types when using numpy dtypes
+                or string names. Ignored for string types and ``DLDataType``.
+            prim_mode: Prim binding mode (e.g., ``PrimMode.CREATE_NEW``).
 
         Returns:
             AttributeBinding[List[DLTensor]] for array attribute writes.
 
-        Note:
-            The dtype specifies the element type, not the array length. Each
-            tensor in subsequent writes can have different lengths, but all must
-            share the same element dtype matching the USD schema.
-
         Example:
             ```python
-            from ovrtx._src.dlpack import DLDataType
-            # int[] attribute binding
+            # String form — no imports needed for dtype specification:
             binding = renderer.bind_array_attribute(
-                prim_paths=["/World/Mesh1", "/World/Mesh2"],
-                attribute_name="faceVertexCounts",
-                dtype=DLDataType.from_str("int32"),
-            )
-            binding.write([counts1, counts2])  # Variable lengths OK
-            binding.unbind()
+                ["/World/Mesh"], "faceVertexCounts", dtype="int32")
+
+            binding = renderer.bind_array_attribute(
+                ["/World/Mesh"], "points", dtype="float32", shape=(3,))
+
+            # NumPy dtype objects also work:
+            import numpy as np
+            binding = renderer.bind_array_attribute(
+                ["/World/Mesh"], "normals", dtype=np.float32, shape=(3,))
             ```
         """
         return self.bind_array_attribute_async(
-            prim_paths=prim_paths, attribute_name=attribute_name, dtype=dtype, prim_mode=prim_mode
+            prim_paths=prim_paths, attribute_name=attribute_name, dtype=dtype, shape=shape, prim_mode=prim_mode
         ).wait()
 
     def bind_array_attribute_async(
         self,
         prim_paths: List[str],
         attribute_name: str,
-        dtype: Optional[DLDataType] = None,
-        prim_mode: str = "existing_only",
+        dtype: Any = None,
+        shape: Optional[tuple] = None,
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
     ) -> "Operation[AttributeBinding[List[DLTensor]]]":
-        """Create a persistent binding for array attribute writes (async)."""
+        """Create a persistent binding for array attribute writes (async).
+
+        See :meth:`bind_array_attribute` for full documentation and examples.
+        """
         return self._bind_attribute_internal(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
-            semantic=None,
             dtype=dtype,
+            shape=shape,
+            semantic=Semantic.NONE,
             prim_mode=prim_mode,
             is_array=True,
         )
@@ -1590,20 +1908,39 @@ class Renderer:
         self,
         prim_paths: List[str],
         attribute_name: str,
-        semantic: Optional[str],
-        dtype: Optional[DLDataType],
-        prim_mode: str,
+        dtype: Any,
+        shape: Optional[tuple],
+        semantic: Semantic,
+        prim_mode: PrimMode,
         is_array: bool,
     ) -> Operation[AttributeBinding]:
         """Internal: Create attribute binding (shared implementation for scalar and array)."""
         if self._handle is None:
             raise RuntimeError("Renderer is not valid")
 
-        # Parse semantic and resolve dtype
-        semantic_constant, semantic_dtype = self._resolve_semantic_and_dtype(semantic, dtype, context="bind_attribute")
+        element_shape: Optional[tuple] = None
 
-        # Build binding descriptor
-        binding_storage = self._build_binding_desc(
+        if semantic != Semantic.NONE:
+            # Explicit semantic: resolve dtype from the semantic constant
+            if shape is not None:
+                raise ValueError("shape= must not be provided when semantic= is specified")
+            resolved_dtype = dtype if isinstance(dtype, DLDataType) else None
+            semantic_constant, semantic_dtype = self._resolve_semantic_and_dtype(
+                semantic, resolved_dtype, context="bind_attribute"
+            )
+        elif isinstance(dtype, DLDataType):
+            # Explicit DLDataType: pass through directly with SEMANTIC_NONE
+            semantic_constant = Semantic.NONE
+            semantic_dtype = dtype
+        elif dtype is not None:
+            # New-style dtype + shape
+            semantic_constant, semantic_dtype, element_shape = self._resolve_new_dtype_and_shape(
+                dtype, shape, context="bind_attribute"
+            )
+        else:
+            raise ValueError("bind_attribute: dtype is required. Use e.g. dtype='float32', shape=(3,)")
+
+        binding_storage = _AttributeBindingDescStorage(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
             dtype=semantic_dtype,
@@ -1612,17 +1949,16 @@ class Renderer:
             is_array=is_array,
         )
 
-        # Call C API
         result, handle = self._bindings.create_attribute_binding(self._handle, binding_storage.binding_desc)
 
         if result.status != bindings.OVRTX_API_SUCCESS:
             error_msg = self._bindings.get_last_error() or "Unknown error"
             raise RuntimeError(f"Failed to enqueue attribute binding creation: {error_msg}")
 
-        # Create AttributeBinding with raw handle value, semantic, dtype, renderer reference, and is_array flag
-        binding_handle = AttributeBinding(handle.value, semantic_constant, semantic_dtype, self, is_array=is_array)
+        binding_handle = AttributeBinding(
+            handle.value, semantic_constant, semantic_dtype, self, is_array=is_array, shape=element_shape
+        )
 
-        # Create operation
         op = Operation(
             renderer=self,
             op_id=result.op_index.value,
@@ -1630,7 +1966,6 @@ class Renderer:
             operation_name=f"bind_attribute({attribute_name})",
         )
 
-        # Store binding_storage to keep it alive until operation completes
         op._storage_refs = [binding_storage]
 
         return op
@@ -1684,41 +2019,51 @@ class Renderer:
         self,
         prim_paths: List[str],
         attribute_name: str,
-        semantic: Optional[str] = None,
-        dtype: Optional[DLDataType] = None,
-        device: str = "cpu",
+        dtype: Any = None,
+        shape: Optional[tuple] = None,
+        semantic: Semantic = Semantic.NONE,
+        device: Device = Device.CPU,
         device_id: int = 0,
-        prim_mode: str = "existing_only",
+        prim_mode: PrimMode = PrimMode.EXISTING_ONLY,
     ) -> AttributeMapping:
-        """Map attribute buffer for direct zero-copy writes (synchronous, by-name).
+        """Map attribute buffer for direct writes (synchronous, by-name).
 
-        Returns an AttributeMapping that provides direct access to RTX's internal buffer.
-        Write data via the DLPack protocol (NumPy, Warp, etc.), then call unmap_attribute()
-        to apply the changes.
+        Returns an AttributeMapping that provides access to an internal buffer.
+        Write data using NumPy, Warp, or any ``__dlpack__``-compatible library,
+        then call ``unmap_attribute()`` to apply the changes.
 
-        For repeated operations on the same attribute, consider using bind_attribute()
-        followed by binding.map() for better performance.
+        When ``dtype``/``shape`` are provided, the returned tensor is
+        automatically shaped to match. For example, ``dtype="float32",
+        shape=(3,)`` returns a tensor with shape ``(N, 3)`` and ``float32``
+        dtype, ready for direct NumPy/Warp consumption.
 
         Note:
-            Array attributes (e.g., float3[] points) are not supported for mapping.
-            They may have variable lengths per prim, which is incompatible with
-            contiguous tensor mapping. Use write_array_attribute() instead.
+            Array attributes (e.g., ``float3[] points``) are not supported for
+            mapping. Use ``write_array_attribute()`` instead.
 
         Args:
             prim_paths: List of prim paths.
             attribute_name: Name of the attribute.
-            semantic: Semantic string ("transform_4x4", "color_rgba4b", "color_rgb3f").
-                If provided, dtype is inferred automatically.
-            dtype: DLDataType for the attribute. Required only if semantic is None.
-            device: Device for mapping ("cpu" or "cuda").
+            dtype: Element type. Accepts string names (``"float32"``,
+                ``"float64"``, ``"int32"``, ``"token"``, ``"path"``),
+                NumPy dtypes (``np.float32``, ``np.dtype("float64")``),
+                any dtype object with ``.kind``/``.itemsize`` attributes
+                (CuPy, JAX), Python built-ins (``float``, ``int``), or a
+                ``DLDataType`` object.
+            shape: Element shape tuple (e.g. ``(3,)`` for 3-component vectors,
+                ``(4, 4)`` for matrices). When provided, the mapped tensor is
+                reshaped to ``(N, *shape)``. Ignored for ``DLDataType``.
+            semantic: Optional attribute semantic (e.g.,
+                ``Semantic.XFORM_MAT4x4``). Alternative to ``dtype``/``shape``
+                for specifying the attribute type.
+            device: Device for mapping (``Device.CPU`` or ``Device.CUDA``).
             device_id: Device ID (default 0, typically GPU index for CUDA).
-            prim_mode: Prim mode ("existing_only", "must_exist", or "create_new").
+            prim_mode: Prim binding mode (e.g., ``PrimMode.EXISTING_ONLY``).
 
         Returns:
-            AttributeMapping with zero-copy access to RTX's internal buffer.
-            - For Matrix4d: tensor has shape (N, 4, 4) for NumPy-friendly operations
-            - For RGBA color: tensor has shape (N, 4) for RGBA channels
-            - For RGB color: tensor has shape (N, 3) for RGB channels
+            AttributeMapping with access to the internal buffer. When
+            ``shape`` was provided, the tensor has dimensions ``(N, *shape)``
+            with a scalar element dtype, ready for NumPy/Warp consumption.
 
         Raises:
             RuntimeError: If renderer is invalid or mapping fails.
@@ -1727,32 +2072,48 @@ class Renderer:
         Example:
             ```python
             import numpy as np
+
+            # String form — no imports needed for dtype specification:
             mapping = renderer.map_attribute(
-                prim_paths=["/World/Cube"],
-                attribute_name="omni:fabric:worldMatrix",
-                semantic="transform_4x4"
-            )
+                ["/World/Cube"], "xformOp:transform",
+                dtype="float64", shape=(4, 4))
             np.from_dlpack(mapping.tensor)[0] = np.eye(4)
             renderer.unmap_attribute(mapping)
-            ```
 
-        Or use as context manager:
-            ```python
-            with renderer.map_attribute(...) as mapping:
-                np.from_dlpack(mapping.tensor)[0] = np.eye(4)
+            # NumPy dtype objects also work:
+            with renderer.map_attribute(["/World/Cube"], "points",
+                    dtype=np.float32, shape=(3,)) as mapping:
+                np.from_dlpack(mapping.tensor)[:] = new_points
             ```
         """
         if self._handle is None:
             raise RuntimeError("Renderer is not valid")
 
-        # Parse semantic and resolve dtype
-        semantic_constant, semantic_dtype = self._resolve_semantic_and_dtype(semantic, dtype, context="map_attribute")
+        element_shape: Optional[tuple] = None
 
-        # Build mapping descriptor
-        mapping_desc = self._build_mapping_desc(device, device_id)
+        if semantic != Semantic.NONE:
+            # Explicit semantic: resolve dtype from the semantic constant
+            if shape is not None:
+                raise ValueError("shape= must not be provided when semantic= is specified")
+            resolved_dtype = dtype if isinstance(dtype, DLDataType) else None
+            semantic_constant, semantic_dtype = self._resolve_semantic_and_dtype(
+                semantic, resolved_dtype, context="map_attribute"
+            )
+        elif isinstance(dtype, DLDataType):
+            # Explicit DLDataType: pass through directly with SEMANTIC_NONE
+            semantic_constant = Semantic.NONE
+            semantic_dtype = dtype
+        elif dtype is not None:
+            # New-style dtype + shape
+            semantic_constant, semantic_dtype, element_shape = self._resolve_new_dtype_and_shape(
+                dtype, shape, context="map_attribute"
+            )
+        else:
+            raise ValueError("map_attribute: dtype is required. Use e.g. dtype='float32', shape=(3,)")
 
-        # Build inline descriptor
-        binding_storage = self._build_binding_desc(
+        mapping_desc = bindings.ovrtx_mapping_desc_t(device_type=device, device_id=device_id)
+
+        binding_storage = _AttributeBindingDescStorage(
             prim_paths=prim_paths,
             attribute_name=attribute_name,
             dtype=semantic_dtype,
@@ -1760,7 +2121,6 @@ class Renderer:
             prim_mode=prim_mode,
         )
 
-        # Call C API (synchronous)
         result, c_mapping = self._bindings.map_attribute(
             self._handle, binding_storage.binding_desc_or_handle, mapping_desc
         )
@@ -1769,10 +2129,8 @@ class Renderer:
             error_msg = self._bindings.get_last_error() or "Unknown error"
             raise RuntimeError(f"Failed to map attribute: {error_msg}")
 
-        # Create semantic-aware reshaped DLTensor view
-        reshaped_tensor = self._create_semantic_aware_dltensor(c_mapping.dl, semantic_constant)
+        reshaped_tensor = self._create_semantic_aware_dltensor(c_mapping.dl, semantic_constant, element_shape)
 
-        # Create AttributeMapping wrapper
         mapping = AttributeMapping(
             mapping=c_mapping,
             renderer=self,
@@ -1781,48 +2139,40 @@ class Renderer:
             device=device,
         )
 
-        # Keep binding storage alive by attaching to mapping
         mapping._binding_storage = binding_storage
 
         return mapping
 
     def _map_attribute_by_binding(
-        self, binding: AttributeBinding, device: str = "cpu", device_id: int = 0
+        self, binding: AttributeBinding, device: Device = Device.CPU, device_id: int = 0
     ) -> AttributeMapping:
         """Map attribute buffer using a persistent binding handle (synchronous).
 
-        Returns an AttributeMapping that provides direct access to RTX's internal buffer.
-        Write data via the DLPack protocol (NumPy, Warp, etc.), then call unmap_attribute()
-        to apply the changes.
+        Returns an AttributeMapping with access to the internal buffer.
+        Write data using NumPy, Warp, or any ``__dlpack__``-compatible library,
+        then call ``unmap_attribute()`` to apply the changes.
 
-        This is more efficient than map_attribute() for repeated operations since the
-        binding is already created.
+        When the binding was created with ``shape=``, the mapped tensor is
+        automatically shaped to ``(N, *shape)`` with a scalar element dtype.
 
         Args:
-            binding: AttributeBinding from bind_attribute()
-            device: Device for mapping ("cpu" or "cuda")
-            device_id: Device ID (default 0, typically GPU index for CUDA)
+            binding: AttributeBinding from bind_attribute().
+            device: Device for mapping (Device.CPU or Device.CUDA).
+            device_id: Device ID (default 0, typically GPU index for CUDA).
 
         Returns:
-            AttributeMapping with zero-copy access to RTX's internal buffer.
-            Tensor shape is determined by the semantic stored in the binding:
-            - For Matrix4d: tensor has shape (N, 4, 4) for NumPy-friendly operations
-            - For RGBA color: tensor has shape (N, 4) for RGBA channels
-            - For RGB color: tensor has shape (N, 3) for RGB channels
+            AttributeMapping with access to the internal buffer.
 
         Raises:
-            RuntimeError: If renderer is invalid or mapping fails
+            RuntimeError: If renderer is invalid or mapping fails.
 
         Example:
             ```python
             import numpy as np
-            # Create binding once
+
             binding = renderer.bind_attribute(
-                prim_paths=["/World/Cube"],
-                attribute_name="omni:fabric:worldMatrix",
-                semantic="transform_4x4"
-            )
-            # Map using binding (faster for repeated operations)
+                ["/World/Cube"], "xformOp:transform",
+                dtype="float64", shape=(4, 4))
             mapping = binding.map()
             np.from_dlpack(mapping.tensor)[0] = np.eye(4)
             mapping.unmap()
@@ -1831,31 +2181,26 @@ class Renderer:
         if self._handle is None:
             raise RuntimeError("Renderer is not valid")
 
-        # Build mapping descriptor
-        mapping_desc = self._build_mapping_desc(device, device_id)
+        mapping_desc = bindings.ovrtx_mapping_desc_t(device_type=device, device_id=device_id)
 
-        # Use persistent handle
         binding_desc_or_handle = bindings.ovrtx_binding_desc_or_handle_t(
-            binding_desc=bindings.ovrtx_binding_desc_t(),  # Empty descriptor
+            binding_desc=bindings.ovrtx_binding_desc_t(),
             binding_handle=bindings.ovrtx_attribute_binding_handle_t(binding.handle),
         )
 
-        # Call C API (synchronous)
         result, c_mapping = self._bindings.map_attribute(self._handle, binding_desc_or_handle, mapping_desc)
 
         if result.status != bindings.OVRTX_API_SUCCESS:
             error_msg = self._bindings.get_last_error() or "Unknown error"
             raise RuntimeError(f"Failed to map attribute: {error_msg}")
 
-        # Create semantic-aware reshaped DLTensor view (using semantic from binding)
-        reshaped_tensor = self._create_semantic_aware_dltensor(c_mapping.dl, binding.semantic)
+        reshaped_tensor = self._create_semantic_aware_dltensor(c_mapping.dl, binding.semantic, binding.shape)
 
-        # Create AttributeMapping wrapper
         mapping = AttributeMapping(
             mapping=c_mapping,
             renderer=self,
             dltensor=reshaped_tensor,
-            binding_desc=None,  # No inline descriptor when using binding handle
+            binding_desc=None,
             device=device,
         )
 
@@ -1888,8 +2233,7 @@ class Renderer:
             Data must be fully written to mapping.tensor before calling this.
             The mapping cannot be used after unmap.
         """
-        # Validation: CUDA sync only for CUDA-mapped attributes
-        if mapping._device == "cpu" and (event is not None or stream is not None):
+        if mapping._device == Device.CPU and (event is not None or stream is not None):
             raise ValueError("CUDA sync parameters (event/stream) not applicable for CPU-mapped attributes")
 
         # Validation: event and stream are mutually exclusive

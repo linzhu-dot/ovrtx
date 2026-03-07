@@ -85,12 +85,14 @@ static CUcontext g_context = nullptr;
 static CUmodule g_module = nullptr;
 static CUfunction g_kernel_function = nullptr;
 
-// Double-buffered image state
+// Double-buffered image state imported from Vulkan export handles.
+// Each index corresponds to one ping-pong buffer used by main.cpp.
 static CUexternalMemory g_external_memory[CUDA_SHARED_IMAGE_COUNT] = {};
 static CUmipmappedArray g_mipmap_array[CUDA_SHARED_IMAGE_COUNT] = {};
 static CUarray g_cuda_array[CUDA_SHARED_IMAGE_COUNT] = {};
 
-// Timeline semaphore for async synchronization
+// CUDA-visible handle to Vulkan timeline semaphore used for producer->consumer
+// ordering without CPU blocking.
 static CUexternalSemaphore g_timeline_semaphore = nullptr;
 
 #define CU_CHECK(call)                                                           \
@@ -128,7 +130,8 @@ static CUexternalSemaphore g_timeline_semaphore = nullptr;
     } while (0)
 
 bool cuda_init(CUuuid* out_uuid) {
-    // Get the current context (created by ovrtx)
+    // Reuse the context that ovrtx already initialized so mapped ovrtx arrays and
+    // imported Vulkan memory are visible in the same CUDA context.
     CU_CHECK(cuCtxGetCurrent(&g_context));
     
     if (!g_context) {
@@ -247,7 +250,8 @@ static CUsurfObject cuda_import_vulkan_image_finish(
     int height,
     CudaImageFormat format
 ) {
-    // Map to mipmapped array
+    // Map imported VkDeviceMemory as a CUDA array. This sample always maps a
+    // single mip level and writes via surface operations.
     CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC mipmap_desc = {};
     mipmap_desc.offset = 0;
     mipmap_desc.arrayDesc.Width = width;
@@ -277,7 +281,8 @@ static CUsurfObject cuda_import_vulkan_image_finish(
         return 0;
     }
     
-    // Create surface object
+    // Surface object gives kernels/copies a typed write target abstraction over
+    // imported image memory.
     CUDA_RESOURCE_DESC res_desc = {};
     res_desc.resType = CU_RESOURCE_TYPE_ARRAY;
     res_desc.res.array.hArray = g_cuda_array[index];
@@ -329,8 +334,8 @@ CUsurfObject cuda_import_vulkan_image(
 }
 
 void cuda_import_timeline_semaphore(void* handle) {
-    // Import timeline semaphore (Windows)
-    // Use TIMELINE_SEMAPHORE_WIN32 type for Vulkan timeline semaphores
+    // Use explicit timeline semaphore handle type so CUDA can signal counter
+    // values that Vulkan waits on during submit.
     CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC sem_desc = {};
     sem_desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32;
     sem_desc.handle.win32.handle = handle;
@@ -372,9 +377,10 @@ CUsurfObject cuda_import_vulkan_image(
 }
 
 void cuda_import_timeline_semaphore(int timeline_semaphore_fd) {
-    // Import timeline semaphore (Linux)
+    // Must use timeline semaphore FD type (not opaque FD), otherwise CUDA
+    // cannot signal monotonically increasing fence values for Vulkan waits.
     CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC sem_desc = {};
-    sem_desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD;
+    sem_desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD;
     sem_desc.handle.fd = timeline_semaphore_fd;
     sem_desc.flags = 0;
     
@@ -397,6 +403,7 @@ void cuda_signal_timeline(uint64_t value, CUstream stream) {
         return;
     }
     
+    // Signal happens on the CUDA stream so it is ordered after queued copies.
     CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS params = {};
     params.params.fence.value = value;
     params.flags = 0;
@@ -516,7 +523,8 @@ void cuda_copy_array_to_surface(
         return;
     }
     
-    // Copy from array to array
+    // ovrtx output and imported Vulkan targets are both CUDA arrays; array->array
+    // copy avoids intermediate linear allocations and preserves GPU locality.
     CUDA_MEMCPY2D copy_params = {};
     copy_params.srcMemoryType = CU_MEMORYTYPE_ARRAY;
     copy_params.srcArray = src_array;
@@ -528,7 +536,8 @@ void cuda_copy_array_to_surface(
     copy_params.dstXInBytes = 0;
     copy_params.dstY = 0;
     
-    // Width in bytes: Half4 = 8 bytes/pixel, UInt8_4 = 4 bytes/pixel
+    // ovrtx output type determines byte layout. WidthInBytes must match the
+    // imported Vulkan format selected in main.cpp.
     int bytes_per_pixel = (format == CudaImageFormat::Half4) ? 8 : 4;
     copy_params.WidthInBytes = width * bytes_per_pixel;
     copy_params.Height = height;
@@ -637,10 +646,11 @@ std::vector<uint8_t> cuda_read_surface_rgba8(
     }
 
     if (format == CudaImageFormat::UInt8_4) {
-        // Already sRGB RGBA8 -- direct copy
+        // LdrColor path already matches PNG target encoding closely.
         memcpy(rgba8.data(), raw.data(), rgba8.size());
     } else {
-        // Half4 (lin_rec709) -> sRGB RGBA8
+        // HdrColor path is half-float linear; convert to 8-bit sRGB for
+        // conventional image viewing/output.
         uint16_t const* src = reinterpret_cast<uint16_t const*>(raw.data());
         for (int i = 0; i < width * height; ++i) {
             float r = half_to_float(src[i * 4 + 0]);

@@ -54,31 +54,50 @@ class ovx_string_t(ctypes.Structure):
         return f"ovx_string_t({value_repr}, ptr={self.ptr}, length={self.length})"
 
 
-OVRTX_CONFIG_VALUE_BOOL: int = 0
-OVRTX_CONFIG_VALUE_INT64: int = 1
-OVRTX_CONFIG_VALUE_UINT64: int = 2
-OVRTX_CONFIG_VALUE_DOUBLE: int = 3
-OVRTX_CONFIG_VALUE_STRING: int = 4
-OVRTX_CONFIG_VALUE_BLOB: int = 5
+# ovrtx_config_key_type_t
+OVRTX_CONFIG_KEY_TYPE_BOOL: int = 0
+OVRTX_CONFIG_KEY_TYPE_INT64: int = 1
+OVRTX_CONFIG_KEY_TYPE_UINT64: int = 2
+OVRTX_CONFIG_KEY_TYPE_DOUBLE: int = 3
+OVRTX_CONFIG_KEY_TYPE_STRING: int = 4
+OVRTX_CONFIG_KEY_TYPE_BLOB: int = 5
+
+# ovrtx_config_bool_t
+OVRTX_CONFIG_SYNC_MODE: int = 0
+OVRTX_CONFIG_ENABLE_PROFILING: int = 1
+OVRTX_CONFIG_READ_GPU_TRANSFORMS: int = 2
+OVRTX_CONFIG_OUTPUT_PARTIAL_FRAMES: int = 3
+OVRTX_CONFIG_KEEP_SYSTEM_ALIVE: int = 4
+
+# ovrtx_config_string_t
+OVRTX_CONFIG_LOG_FILE_PATH: int = 1
+OVRTX_CONFIG_LOG_LEVEL: int = 2
+OVRTX_CONFIG_ACTIVE_CUDA_GPUS: int = 3
 
 
-class ovrtx_renderer_config_value_type_t(ctypes.c_int):
-    """Value type discriminator."""
-
+class ovrtx_config_key_type_t(ctypes.c_int):
     pass
 
 
-class ovrtx_config_blob_t(ctypes.Structure):
-    """Blob data structure."""
-
+class ovrtx_config_blob_value_t(ctypes.Structure):
     _fields_ = [
         ("data", ctypes.c_void_p),
         ("size", ctypes.c_size_t),
     ]
 
 
-class ovrtx_renderer_config_value_t(ctypes.Structure):
-    """Tagged union value for config entries."""
+class ovrtx_config_entry_t(ctypes.Structure):
+    """Single config entry. key_type selects which key and value union members are valid."""
+
+    class _KeyUnion(ctypes.Union):
+        _fields_ = [
+            ("bool_key", ctypes.c_int),
+            ("int64_key", ctypes.c_int),
+            ("uint64_key", ctypes.c_int),
+            ("double_key", ctypes.c_int),
+            ("string_key", ctypes.c_int),
+            ("blob_key", ctypes.c_int),
+        ]
 
     class _ValueUnion(ctypes.Union):
         _fields_ = [
@@ -87,87 +106,76 @@ class ovrtx_renderer_config_value_t(ctypes.Structure):
             ("uint_value", ctypes.c_uint64),
             ("double_value", ctypes.c_double),
             ("string_value", ovx_string_t),
-            ("blob_value", ovrtx_config_blob_t),
+            ("blob_value", ovrtx_config_blob_value_t),
         ]
 
     _fields_ = [
-        ("type", ovrtx_renderer_config_value_type_t),
-        ("_union", _ValueUnion),
+        ("key_type", ovrtx_config_key_type_t),
+        ("key", _KeyUnion),
+        ("value", _ValueUnion),
     ]
 
 
-class ovrtx_renderer_config_entry_t(ctypes.Structure):
-    """Config entry with self-contained lifetime management."""
+def ovrtx_config_entry_bool(key: int, value: bool) -> ovrtx_config_entry_t:
+    """Build a config entry for a boolean setting."""
+    entry = ovrtx_config_entry_t()
+    entry.key_type = OVRTX_CONFIG_KEY_TYPE_BOOL
+    entry.key.bool_key = key
+    entry.value.bool_value = value
+    return entry
 
-    _fields_ = [
-        ("key", ovx_string_t),
-        ("value", ovrtx_renderer_config_value_t),
-    ]
 
-    def __init__(self, key: str, value: ovrtx_renderer_config_value_t, data: Optional[Any] = None):
-        """Create entry, retaining ownership of key and value."""
-        self._key = ovx_string_t(key)
-        if data is not None:
-            self._data = data
+def ovrtx_config_entry_string(key: int, value: str) -> ovrtx_config_entry_t:
+    """Build a config entry for a string setting.
 
-        super().__init__(key=self._key, value=value)
+    Constructs an ovx_string_t internally and attaches it as entry._string_ref
+    to prevent GC of the underlying buffer.  ctypes only copies the C-level
+    ptr/length into the union -- the Python _bytes attribute that owns the
+    buffer memory is NOT copied.  All shallow copies (union field, C array)
+    share the same ptr; the single buffer is owned by _string_ref._bytes.
+    The companion ovrtx_config_t stores _entries to keep entries (and therefore
+    their _string_ref) alive for the entire config lifetime.
+    """
+    entry = ovrtx_config_entry_t()
+    entry.key_type = OVRTX_CONFIG_KEY_TYPE_STRING
+    entry.key.string_key = key
+    entry._string_ref = ovx_string_t(value)
+    entry.value.string_value = entry._string_ref
+    return entry
 
-    @classmethod
-    def from_bool(cls, key: str, value: bool) -> "ovrtx_renderer_config_entry_t":
-        value_union = ovrtx_renderer_config_value_t._ValueUnion(bool_value=value)
-        return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_BOOL, value_union))
 
-    @classmethod
-    def from_int64(cls, key: str, value: int) -> "ovrtx_renderer_config_entry_t":
-        value_union = ovrtx_renderer_config_value_t._ValueUnion(int_value=value)
-        return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_INT64, value_union))
+def ovrtx_config_entry_blob(key: int, value: bytes) -> ovrtx_config_entry_t:
+    """Build a config entry for a blob setting.
 
-    @classmethod
-    def from_uint64(cls, key: str, value: int) -> "ovrtx_renderer_config_entry_t":
-        value_union = ovrtx_renderer_config_value_t._ValueUnion(uint_value=value)
-        return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_UINT64, value_union))
-
-    @classmethod
-    def from_double(cls, key: str, value: float) -> "ovrtx_renderer_config_entry_t":
-        value_union = ovrtx_renderer_config_value_t._ValueUnion(double_value=value)
-        return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_DOUBLE, value_union))
-
-    @classmethod
-    def from_bytes(cls, key: str, data: bytes) -> "ovrtx_renderer_config_entry_t":
-        if not data:
-            value_union = ovrtx_renderer_config_value_t._ValueUnion(blob_value=ovrtx_config_blob_t(data=None, size=0))
-            return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_BLOB, value_union))
-        else:
-            # create a new ctypes bytes buffer from the data ...
-            buffer = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
-            blob = ovrtx_config_blob_t(data=ctypes.cast(buffer, ctypes.c_void_p), size=len(buffer))
-            # ... and pass it to the constructor, which will keep it alive through its data argument
-            # (otherwise only the ctypes union fields will be copied during the assignment)
-            value_union = ovrtx_renderer_config_value_t._ValueUnion(blob_value=blob)
-            return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_BLOB, value_union), buffer)
-
-    @classmethod
-    def from_string(cls, key: str, value: str) -> "ovrtx_renderer_config_entry_t":
-        # create a new ovx_string_t object and keep it alive through the constructor's data argument
-        # (otherwise only the ctypes struct fields will be copied during the assignment)
-        string_value = ovx_string_t(value)
-        value_union = ovrtx_renderer_config_value_t._ValueUnion(string_value=string_value)
-        return cls(key, ovrtx_renderer_config_value_t(OVRTX_CONFIG_VALUE_STRING, value_union), string_value)
+    Creates a ctypes buffer internally and attaches it as entry._blob_ref
+    to prevent GC of the underlying data.  Same lifetime pattern as
+    ovrtx_config_entry_string -- see its docstring for details.
+    """
+    entry = ovrtx_config_entry_t()
+    entry.key_type = OVRTX_CONFIG_KEY_TYPE_BLOB
+    entry.key.blob_key = key
+    entry._blob_ref = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+    entry.value.blob_value.data = ctypes.addressof(entry._blob_ref)
+    entry.value.blob_value.size = len(value)
+    return entry
 
 
 class ovrtx_config_t(ctypes.Structure):
-    """Config container with self-contained lifetime management."""
+    """Config container passed to ovrtx_initialize() and ovrtx_create_renderer()."""
 
     _fields_ = [
-        ("entries", ctypes.POINTER(ovrtx_renderer_config_entry_t)),
+        ("entries", ctypes.POINTER(ovrtx_config_entry_t)),
         ("entry_count", ctypes.c_size_t),
     ]
 
-    def __init__(self, entries: list[ovrtx_renderer_config_entry_t]):
-        """Create config, retaining ownership of entries array."""
+    def __init__(self, entries: list[ovrtx_config_entry_t]):
         if entries:
-            # Defensively keep array AND individual entries alive to prevent garbage collecting pointer-wrapped objects
-            self._array = (ovrtx_renderer_config_entry_t * len(entries))(*entries)
+            self._array = (ovrtx_config_entry_t * len(entries))(*entries)
+            # Keep the original Python entry objects alive.  The C array (_array)
+            # only contains byte copies, but each entry may hold _string_ref (or
+            # _blob_ref) attributes whose underlying buffers are still referenced
+            # by the copied C-level pointers.  Dropping _entries would allow GC to
+            # collect those buffers while the C array still points to them.
             self._entries = entries
             super().__init__(entries=self._array, entry_count=len(entries))
         else:
@@ -412,13 +420,11 @@ class ovrtx_rendered_output_t(ctypes.Structure):
 
 # Enum constants for ovrtx_attribute_semantic_t
 OVRTX_SEMANTIC_NONE = 0
-OVRTX_SEMANTIC_TRANSFORM_4x4 = 1  # Column-major 4x4 double matrix (kDLFloat, 64, 16)
-OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT4f_SCALE3f = 2  # 3xdouble pos + 4xfloat rot + 3xfloat scale (kDLUint, 8, 52)
-OVRTX_SEMANTIC_TRANSFORM_POS3d_ROT3x3f = 3  # 3xdouble pos + 3x3float rotation matrix (kDLUint, 8, 60)
-OVRTX_SEMANTIC_PATH_STRING = 4  # Prim paths as ovx_string_t (kDLUint, 128, 1). Sync data access only.
-OVRTX_SEMANTIC_TOKEN_STRING = 5  # String tokens as ovx_string_t (kDLUint, 128, 1). Sync data access only.
-OVRTX_SEMANTIC_COLOR_RGBA4b = 6  # Color as 4 bytes (kDLUint, 8, 4)
-OVRTX_SEMANTIC_COLOR_RGB3f = 7  # Color as 3 floats (kDLFloat, 32, 3)
+OVRTX_SEMANTIC_XFORM_MAT4x4 = 1  # Row-major 4x4 double matrix (kDLFloat, 64, 16)
+OVRTX_SEMANTIC_XFORM_POS3d_ROT4f_SCALE3f = 2  # 3xdouble pos + 4xfloat rot + 3xfloat scale (kDLUInt, 8, 56)
+OVRTX_SEMANTIC_XFORM_POS3d_ROT3x3f = 3  # 3xdouble pos + 3x3float rotation matrix (kDLUInt, 8, 64)
+OVRTX_SEMANTIC_PATH_STRING = 4  # Prim paths as ovx_string_t (kDLUInt, 128, 1). Sync data access only.
+OVRTX_SEMANTIC_TOKEN_STRING = 5  # String tokens as ovx_string_t (kDLUInt, 128, 1). Sync data access only.
 
 
 class ovrtx_attribute_semantic_t(ctypes.c_int):
@@ -556,13 +562,19 @@ class Bindings:
         valid until the next API call on the same thread.
     """
 
-    def __init__(self, lib: ctypes.CDLL):
+    def __init__(self, lib: ctypes.CDLL, lib_version: tuple):
         self._lib: ctypes.CDLL = lib
+        self._lib_version: tuple = lib_version
 
     @property
     def library_path(self) -> Path:
         """Get the path of the loaded library."""
         return Path(self._lib._name)
+
+    @property
+    def version(self) -> tuple:
+        """Runtime library version as a (major, minor, patch) tuple."""
+        return self._lib_version
 
     def create_renderer(self, config: ovrtx_config_t) -> tuple[ovrtx_result_t, Any]:
         """Create a new renderer instance.
@@ -913,6 +925,7 @@ class _LibraryLoader:
 
     def __init__(self):
         self._lib: Optional[ctypes.CDLL] = None
+        self._lib_version: Optional[tuple] = None
         self._lib_name: str = "ovrtx-dynamic.dll" if sys.platform.startswith("win") else "libovrtx-dynamic.so"
         self._lib_search_paths: List[Path] = []
 
@@ -967,6 +980,27 @@ class _LibraryLoader:
             try:
                 library_path_hint = [Path(OVRTX_LIBRARY_PATH_HINT)] if OVRTX_LIBRARY_PATH_HINT else None
                 lib = self._load_library(library_path_hint)
+
+                # Version check: call ovrtx_get_version() before anything else (it works pre-initialize)
+                lib.ovrtx_get_version.argtypes = [
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.POINTER(ctypes.c_uint32),
+                ]
+                lib.ovrtx_get_version.restype = None
+                major, minor, patch = ctypes.c_uint32(), ctypes.c_uint32(), ctypes.c_uint32()
+                lib.ovrtx_get_version(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
+                self._lib_version = (major.value, minor.value, patch.value)
+
+                from .. import __version__ as ovrtx_version
+
+                lib_ver_str = f"{major.value}.{minor.value}.{patch.value}"
+                expected_prefix = f"{major.value}.{minor.value}."
+                if not ovrtx_version.startswith(expected_prefix):
+                    raise RuntimeError(
+                        f"ovrtx version mismatch: Python bindings are {ovrtx_version} "
+                        f"but loaded library is {lib_ver_str}"
+                    )
 
                 # Configure function signatures
                 lib.ovrtx_initialize.argtypes = [ctypes.POINTER(ovrtx_config_t)]
@@ -1117,7 +1151,7 @@ class _LibraryLoader:
                     f"Function not found in {lib._name if lib else self._lib_name}. Binary version may not match Python bindings."
                 ) from exc
 
-        return Bindings(self._lib)
+        return Bindings(self._lib, self._lib_version)
 
     def _check_pxr_not_available(self) -> None:
         """Verify that the pxr package (usd-core) is not available.

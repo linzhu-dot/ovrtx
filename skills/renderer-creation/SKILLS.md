@@ -24,24 +24,11 @@ The renderer is the central object in ovrtx. You must create one before loading 
 
 Create a renderer with default settings:
 
-```python
-import ovrtx
-
-renderer = ovrtx.Renderer()
-```
+> **Source:** `examples/python/minimal/main.py` snippet `create-renderer`
 
 Or with configuration:
 
-```python
-from ovrtx import Renderer, RendererConfig
-
-config = RendererConfig(
-    sync_mode=True,           # Synchronous mode (blocks on enqueue, useful for debugging)
-    log_file_path="/tmp/ovrtx.log",  # Log file path (supports ${start_timestamp} token)
-    log_level="info",         # "verbose", "info", "warn", "error"
-)
-renderer = Renderer(config=config)
-```
+> **Source:** `tests/conftest.py` snippet `renderer-config`
 
 Cleanup is automatic -- the renderer is destroyed when it goes out of scope.
 
@@ -49,18 +36,7 @@ Cleanup is automatic -- the renderer is destroyed when it goes out of scope.
 
 Create a renderer with no configuration:
 
-```c
-#include <ovrtx/ovrtx.h>
-#include <ovrtx/ovrtx_config.h>
-
-ovrtx_renderer_t* renderer = NULL;
-ovrtx_config_t config = {};
-ovrtx_result_t result = ovrtx_create_renderer(&config, &renderer);
-if (result.status == OVRTX_API_ERROR) {
-    ovx_string_t error = ovrtx_get_last_error();
-    // handle error...
-}
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `create-renderer`
 
 ### Optional explicit initialize/shutdown
 
@@ -68,48 +44,27 @@ if (result.status == OVRTX_API_ERROR) {
 
 Use explicit initialize/shutdown when creating and destroying multiple renderers in a process and you want one-time loader initialization to happen once:
 
-```c
-ovrtx_config_t init_config = {};
-ovrtx_result_t result = ovrtx_initialize(&init_config);
-if (result.status == OVRTX_API_ERROR) {
-    // handle init failure...
-}
-
-// create/destroy one or more renderers...
-
-ovrtx_shutdown();
-```
+> **Source:** `examples/c/vulkan-interop/src/main.cpp` snippet `initialize-and-create-renderer`
 
 With configuration entries:
 
-```c
-ovrtx_renderer_config_entry_t entries[] = {
-    ovrtx_config_entry_sync_mode(true),
-    ovrtx_config_entry_log_level({"info", 4}),
-    ovrtx_config_entry_binary_package_root_path({"/path/to/ovrtx", strlen("/path/to/ovrtx")}),
-};
-
-ovrtx_config_t config;
-config.entries = entries;
-config.entry_count = sizeof(entries) / sizeof(entries[0]);
-
-ovrtx_renderer_t* renderer = NULL;
-ovrtx_result_t result = ovrtx_create_renderer(&config, &renderer);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `create-renderer`
+>
+> To add config entries, populate `config.entries` and `config.entry_count` before calling `ovrtx_create_renderer`. See the `ovrtx_config_entry_*` helpers in `ovrtx_config.h`.
 
 Cleanup is manual -- you must call `ovrtx_destroy_renderer()`:
 
-```c
-ovrtx_destroy_renderer(renderer);
-```
+> **Source:** `examples/c/minimal/main.cpp` snippet `unmap-and-cleanup`
 
 ## Key Types / Functions
 
 | Python | C |
 |--------|---|
 | `Renderer(config=None)` | `ovrtx_create_renderer(config, &renderer)` |
-| `RendererConfig` | `ovrtx_config_t` + `ovrtx_renderer_config_entry_t` |
+| `RendererConfig` | `ovrtx_config_t` + `ovrtx_config_entry_t` |
 | automatic `__del__` | `ovrtx_destroy_renderer(renderer)` |
+| `renderer.version` → `(major, minor, patch)` | `ovrtx_get_version(&major, &minor, &patch)` (callable before init) |
+| `renderer.config` → `RendererConfig` | (no C equivalent -- config was passed at creation) |
 
 Config helpers in C (`ovrtx_config.h`):
 - `ovrtx_config_entry_sync_mode(bool)`
@@ -119,6 +74,8 @@ Config helpers in C (`ovrtx_config.h`):
 - `ovrtx_config_entry_enable_profiling(bool)`
 - `ovrtx_config_entry_read_gpu_transforms(bool)`
 - `ovrtx_config_entry_output_partial_frames(bool)`
+- `ovrtx_config_entry_keep_system_alive(bool)` -- keep shared GPU resources alive after the last renderer is destroyed, so a subsequent `ovrtx_create_renderer` reuses them
+- `ovrtx_config_entry_active_cuda_gpus(ovx_string_t)` -- comma-separated CUDA device indices (e.g., `"0,1,2"`) to select which GPUs to use for rendering
 
 ## Common Pitfalls
 
