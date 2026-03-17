@@ -46,7 +46,7 @@ Note that the first time a program built against ovrtx is run, it will compile a
 The C/C++ examples require CMake and a development environment. On Windows this is provided by [Visual Studio 2017 or newer](https://visualstudio.microsoft.com/). On Linux (Ubuntu):
 
 ```bash
-sudo apt-get build-essential cmake
+sudo apt-get install build-essential cmake
 ```
 
 To get started, first clone this repository and build and run the first example using CMake:
