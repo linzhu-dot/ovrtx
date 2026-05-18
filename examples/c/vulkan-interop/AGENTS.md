@@ -28,7 +28,9 @@ ovrtx-interop/
 ├── AGENTS.md
 ├── shaders/
 │   ├── fullscreen.vert
-│   └── fullscreen.frag
+│   ├── fullscreen.frag
+│   ├── overlay.vert
+│   └── overlay.frag
 ├── src/
 │   ├── main.cpp
 │   ├── camera/
@@ -104,7 +106,7 @@ Options:
 Initialization:
 
 1. `ovrtx_initialize` -> `ovrtx_create_renderer`
-2. Load USD with `ovrtx_add_usd` and wait via `ovrtx_wait_op`
+2. Load USD with `ovrtx_open_usd_from_file` and wait via `ovrtx_wait_op`
 3. Call `cuda_init(&cuda_uuid)` to use the CUDA context/device selected by OVRTX
 4. Run one OVRTX step to detect output type and dimensions
 5. Create Vulkan context using CUDA UUID for device matching
@@ -121,13 +123,17 @@ Main loop:
    - swap `read_idx` and `write_idx`
 3. If camera moved, write transform to OVRTX with `ovrtx_write_attribute`
 4. If no CUDA work pending:
-   - `ovrtx_step` -> `ovrtx_fetch_results` -> `ovrtx_map_rendered_output`
-   - wait on `rendered_output.buffer.cuda_sync.wait_event` (if provided)
+   - `ovrtx_step` -> `ovrtx_fetch_results` -> `ovrtx_map_render_var_output`
+   - wait on `rendered_output.cuda_sync.wait_event` (if provided)
+   - enqueue pending `ovrtx_enqueue_pick_query` before stepping, if the user clicked or dragged in the viewport
+   - `ovrtx_step` -> `ovrtx_fetch_results` -> `ovrtx_map_render_var_output`
+   - if a pick query was submitted, map `OVRTX_RENDER_VAR_PICK_HIT` on CPU, print resolved prim paths, and update selection outline groups
+   - wait on `rendered_output.cuda_sync.wait_event` (if provided)
    - copy OVRTX `CUarray` -> CUDA-imported Vulkan image at `write_idx`
    - signal external timeline semaphore from CUDA
-   - unmap with `ovrtx_unmap_rendered_output` using `copy_done_event`
+   - unmap with `ovrtx_unmap_render_var_output` using `copy_done_event`
    - destroy results via `ovrtx_destroy_results`
-5. Vulkan draws fullscreen triangle sampling image `read_idx`
+5. Vulkan draws fullscreen triangle sampling image `read_idx`, plus the marquee overlay line strip while dragging
 6. Submit/present with Vulkan waiting on `read_timeline_value`
 
 ## OVRTX Integration Contract
@@ -136,10 +142,10 @@ The core OVRTX frame lifecycle used by this sample:
 
 1. `ovrtx_step(...)` enqueues a frame
 2. `ovrtx_fetch_results(...)` waits for completion
-3. `ovrtx_map_rendered_output(...)` maps output as CUDA array (`OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`)
-4. Consume `rendered_output.buffer.dl.data` as `CUarray`
-5. If `rendered_output.buffer.cuda_sync.wait_event != 0`, wait on it in CUDA stream
-6. After copy/compute, call `ovrtx_unmap_rendered_output(...)` and pass completion event
+3. `ovrtx_map_render_var_output(...)` maps output as CUDA array (`OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY`)
+4. Consume `rendered_output.tensors[0].dl->data` as `CUarray`
+5. If `rendered_output.cuda_sync.wait_event != 0`, wait on it in CUDA stream
+6. After copy/compute, call `ovrtx_unmap_render_var_output(...)` and pass completion event
 7. Call `ovrtx_destroy_results(...)`
 
 Do not skip unmap/destroy; the sample treats these as required per-frame cleanup.
@@ -173,6 +179,18 @@ Format mapping used in this sample:
 - Orbit camera input is handled through GLFW callbacks.
 - On change, camera transform is written to `/World/Camera` attribute `omni:fabric:localMatrix`.
 - `OVRTX_SEMANTIC_TRANSFORM_4x4` is used with a 16-lane float64 DLTensor payload.
+
+## Picking and Selection
+
+- Right mouse drag rotates the orbit camera; mouse wheel dollies.
+- Left click enqueues a 1x1 pick query for the clicked RenderProduct pixel.
+- Left drag enqueues a marquee pick query using the drag rectangle and draws the bounds through `overlay.vert` / `overlay.frag`.
+- Any scene used with picking must restrict the picked RenderProduct to CUDA-visible GPU 0 with `uint[] deviceIds = [0]`.
+- Pick results are returned as `OVRTX_RENDER_VAR_PICK_HIT`, mapped on CPU, and resolved to string prim paths with `ovrtx_get_path_dictionary` plus `path_dictionary_get_tokens_from_paths`.
+- Selection outlines are enabled at renderer creation with `ovrtx_config_entry_selection_outline_enabled(true)`.
+- Selection fill styling is enabled at renderer creation with `ovrtx_config_entry_selection_fill_mode(OVRTX_SELECTION_FILL_MODE_GROUP_FILL_COLOR)`.
+- Group `1` is styled with `ovrtx_set_selection_group_styles()` to set a custom outline color and translucent fill color.
+- Current selection is rendered by writing group `1` through `ovrtx_set_selection_outline_group`; group `0` clears prior selection.
 
 ## Dependencies
 
@@ -243,7 +261,7 @@ Data flow (async double-buffered):
 ```
 OrbitCamera::update() → ovrtx_write_attribute(transform)
       ↓
-ovrtx_step() → ovrtx_fetch_results() → ovrtx_map_rendered_output()
+ovrtx_step() → ovrtx_fetch_results() → ovrtx_map_render_var_output()
       ↓
 cuStreamWaitEvent(ovrtx.wait_event)
       ↓
@@ -251,7 +269,7 @@ cuda_copy_array_to_surface(write_idx, CUarray)
       ↓
 cuda_signal_timeline(frame_counter)  ← async signal
       ↓
-ovrtx_unmap_rendered_output()
+ovrtx_unmap_render_var_output()
       ↓
 [Meanwhile] Vulkan renders image[read_idx]
 ```
@@ -259,7 +277,7 @@ ovrtx_unmap_rendered_output()
 ## Orbit Camera Control
 
 Interactive camera control via mouse:
-- Left-click-and-drag rotates camera around target point
+- Right-click-and-drag rotates camera around target point
 - Scroll wheel dollies camera in/out (adjusts distance to target)
 - Uses spherical coordinates (azimuth, elevation, distance)
 - `OrbitCamera` class in `src/camera/orbit_camera.hpp`

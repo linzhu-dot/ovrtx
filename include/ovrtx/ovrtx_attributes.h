@@ -12,7 +12,12 @@
 
 #include "ovrtx_types.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
+
+/** @defgroup ovrtx_attribute_helpers Attribute helper functions
+ *  @{
+ */
 
 /*----------------------------------------------------------------------
 * Transform attribute writes
@@ -60,9 +65,10 @@ static inline ovrtx_enqueue_result_t ovrtx_set_reset_xform_stack(
 * Path and token attribute writes
 */
 
-/*
-* Sets path attribute values from paths as ovx_string_t
-*/
+/**
+ * Write path string values as relationship arrays to an attribute on the specified prims.
+ * @see The implementation section below for full parameter documentation.
+ */
 static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
     ovrtx_renderer_t* instance,
     const ovx_string_t* prim_paths,
@@ -70,9 +76,10 @@ static inline ovrtx_enqueue_result_t ovrtx_set_path_attributes(
     ovx_string_t attribute_name,
     const ovx_string_t* path_values);
 
-/*
-* Sets token attribute values from tokens as ovx_string_t
-*/
+/**
+ * Write token string values to an attribute on the specified prims.
+ * @see The implementation section below for full parameter documentation.
+ */
 static inline ovrtx_enqueue_result_t ovrtx_set_token_attributes(
     ovrtx_renderer_t* instance,
     const ovx_string_t* prim_paths,
@@ -80,6 +87,32 @@ static inline ovrtx_enqueue_result_t ovrtx_set_token_attributes(
     ovx_string_t attribute_name,
     const ovx_string_t* token_values);
 
+/* ----------------------------------------------------------------------
+ * Reserved renderer attributes (@ref OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP,
+ * @ref OVRTX_ATTR_NAME_PICKABLE) — not persisted to Fabric; consumed by the renderer.
+ */
+
+/**
+ * Sets @ref OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP for the given prims (one uint8 group id per prim).
+ * Prims that share the same group id are batched for selection outline; different ids map to distinct outline groups.
+ */
+static inline ovrtx_enqueue_result_t ovrtx_set_selection_outline_group(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    const uint8_t* group_ids);
+
+/**
+ * Sets @ref OVRTX_ATTR_NAME_PICKABLE for the given prims (one bool per prim).
+ * When false, the prim is excluded from viewport picking where supported.
+ */
+static inline ovrtx_enqueue_result_t ovrtx_set_pickable(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    const bool* pickable);
+
+/** @} */ // end of ovrtx_attribute_helpers
 
 /* ----------------------------------------------------------------------
 * Implementation
@@ -101,6 +134,13 @@ static inline ovrtx_enqueue_result_t ovrtx_set_token_attributes(
         typedef char OVRTX_CONCAT(ovrtx_static_assert_, __LINE__)[(cond) ? 1 : -1] OVRTX_UNUSED
 #endif
 
+/** Make a 1-D CPU DLTensor for C attribute writes.
+ *
+ * The C API uses @c DLDataType::lanes for multi-component attribute elements.
+ * For example, pass @c size=10 and @c dtype={kDLFloat,32,3} for a point3f[]
+ * array with 10 points, or @c size=N and @c dtype={kDLFloat,64,16} for N
+ * 4x4 double matrices.
+ */
 static inline DLTensor ovrtx_make_write_cpu_tensor(const void* ptr, const size_t* size, DLDataType dtype)
 {
     static int64_t s_stride1 = 1;
@@ -373,6 +413,42 @@ static inline ovrtx_enqueue_result_t ovrtx_set_token_attributes(
 
     binding_desc = ovrtx_make_binding_desc(prim_paths, path_count, attribute_name, OVRTX_SEMANTIC_TOKEN_STRING, type);
 
+    return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
+}
+
+static inline ovrtx_enqueue_result_t ovrtx_set_selection_outline_group(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    const uint8_t* group_ids)
+{
+    DLDataType type{ kDLUInt, 8, 1 };
+    DLTensor tensor = ovrtx_make_write_cpu_tensor(group_ids, &path_count, type);
+    ovrtx_input_buffer_t buffer = { &tensor, 1, nullptr, {} };
+    ovrtx_binding_desc_or_handle_t binding_desc = ovrtx_make_binding_desc(
+        prim_paths,
+        path_count,
+        literal_to_ovx_string(OVRTX_ATTR_NAME_SELECTION_OUTLINE_GROUP),
+        OVRTX_SEMANTIC_NONE,
+        type);
+    return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
+}
+
+static inline ovrtx_enqueue_result_t ovrtx_set_pickable(
+    ovrtx_renderer_t* instance,
+    const ovx_string_t* prim_paths,
+    size_t path_count,
+    const bool* pickable)
+{
+    DLDataType type{ kDLUInt, 8, 1 };
+    DLTensor tensor = ovrtx_make_write_cpu_tensor(pickable, &path_count, type);
+    ovrtx_input_buffer_t buffer = { &tensor, 1, nullptr, {} };
+    ovrtx_binding_desc_or_handle_t binding_desc = ovrtx_make_binding_desc(
+        prim_paths,
+        path_count,
+        literal_to_ovx_string(OVRTX_ATTR_NAME_PICKABLE),
+        OVRTX_SEMANTIC_NONE,
+        type);
     return ovrtx_write_attribute(instance, &binding_desc, &buffer, OVRTX_DATA_ACCESS_SYNC);
 }
 

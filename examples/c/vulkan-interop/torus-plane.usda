@@ -167,6 +167,7 @@ def "Render" (
 {
     def RenderProduct "Camera" {
         int2 resolution = (1920, 1080)
+        uint[] deviceIds = [0]
         rel camera = </World/Camera>
         rel orderedVars = <HdrColor>
 
@@ -338,5 +339,4 @@ over "OmniverseKit_Top" (
     double3 xformOp:translate = (0, 50000, 0)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 }
-
 

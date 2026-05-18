@@ -118,6 +118,44 @@ The ovrtx dynamic library will automatically load the other dependencies at runt
 
 Note that when static linking ovrtx, you MUST provide the binary package root path or ovrtx will not be able to find the required dependencies at runtime.
 
+Sharing OpenUSD with Other Subsystems
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When ovrtx shares the OpenUSD runtime with other subsystems in the same process, every
+subsystem must publish its USD schema and plugin discovery paths *before* the USD schema
+registry is first populated; that registry is built only once per process. Use
+:c:func:`ovrtx_register_schema_paths` early so the order of subsequent initialize calls
+does not matter:
+
+.. code-block:: c
+
+   // Register schema paths up front, then initialize subsystems in any order.
+   // Pass the same config you will later supply to ovrtx_initialize / ovrtx_create_renderer
+   // so the binary package root used during registration matches the one used at init.
+   ovphysx_prepare_usd_plugins();
+   ovrtx_register_schema_paths(&config);
+
+   ovrtx_create_renderer(&config, &renderer);
+
+For default deployments where ovrtx lives next to the loader library, ``NULL`` is
+acceptable and the loader-library directory is used as the root:
+
+.. code-block:: c
+
+   ovrtx_register_schema_paths(NULL);
+
+For ovrtx-only applications this call is not required — :c:func:`ovrtx_initialize` /
+:c:func:`ovrtx_create_renderer` register the same paths automatically.
+
+Once schema paths have been registered against an effective binary package root, any
+later :c:func:`ovrtx_register_schema_paths`, :c:func:`ovrtx_initialize`, or
+:c:func:`ovrtx_create_renderer` call that resolves to a different root logs a warning
+to stderr and is treated as a no-op against the first-registered root —
+``PXR_PLUGINPATH_NAME`` is one-shot per process, so the first call wins. Use the same
+``OVRTX_CONFIG_BINARY_PACKAGE_ROOT_PATH`` (or the same ``OMNI_USD_PLUGINS_BASE_PATH``
+override) throughout the process. See the function's API documentation for the full
+contract.
+
 Minimal Example
 ---------------
 
@@ -133,5 +171,5 @@ Minimal Example
 Next Steps
 ----------
 
-* Explore more :doc:`../examples/index` including the :doc:`Vulkan Interop <../examples/c_vulkan_interop>` example with real-time GPU rendering.
+* Explore more :doc:`../examples/index` including the :doc:`Vulkan Interop <../examples/c_vulkan_interop>` example with real-time GPU rendering, click picking, marquee selection, and styled selection outlines with translucent fill.
 * See the :doc:`index` for the full C API reference.

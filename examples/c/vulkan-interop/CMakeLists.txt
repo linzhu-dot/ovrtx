@@ -97,6 +97,8 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/fullscreen.vert
     ${SHADER_SOURCE_DIR}/fullscreen.frag
+    ${SHADER_SOURCE_DIR}/overlay.vert
+    ${SHADER_SOURCE_DIR}/overlay.frag
 )
 
 foreach(SHADER_SOURCE ${SHADER_SOURCES})

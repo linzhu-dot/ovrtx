@@ -18,6 +18,10 @@ This is the minimal Python example from the ovrtx README. It demonstrates the ba
 3. Step the renderer to produce a frame
 4. Map the rendered output and display it
 
+.. pull-quote::
+
+   *“Create the smallest useful Python example that loads an existing USD scene, renders one camera frame, maps the color output to CPU memory, and either displays it or saves it as an image through a command-line flag.”*
+
 .. image:: ../../img/example-minimal.jpg
    :alt: Minimal example output
    :align: center
