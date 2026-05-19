@@ -61,10 +61,11 @@ macro(ovrtx_fetch)
 
         FetchContent_Declare(
             ovrtx
-            URL "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx@0.3.0.${OVRTX_PACKAGE_SYSTEM}.zip"
-            URL_HASH SHA256=${OVRTX_HASH}
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            URL "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx@0.3.0.312915.cec773e1.${OVRTX_PACKAGE_SYSTEM}.zip"
+            URL_HASH SHA256=${OVRTX_HASH}
         )
+
 
 
         FetchContent_MakeAvailable(ovrtx)
