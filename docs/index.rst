@@ -29,7 +29,7 @@ In this documentation you will find getting started guides for Python and C, API
 Features
 --------
 
-* Physically accurate simulation of cameras, lidar, radar, ultrasonic and more sensors.
+* Physically accurate simulation of cameras, lidar, radar, and other sensors.
 * Scalable simulation performance from reinforcement learning in-the-loop with tens of thousands of frames per second, through real-time, photorealistic, interactive viewport and navigation, to offline predictive rendering.
 * `OpenUSD <https://aousd.org/>`_ scene description allowing interchange with a vast ecosystem of content creation, CAD and simulation tools.
 * Easy integration with Python simulation and learning ecosystem.
@@ -42,7 +42,7 @@ https://forums.developer.nvidia.com/c/omniverse/300
 License
 -------
 
-The software and materials are governed by the `NVIDIA Software License Agreement <https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/>`_ and the `Product-Specific Terms for NVIDIA Omniverse <https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-omniverse/>`_.
+The software and materials are governed by the `NVIDIA Software License Agreement <https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/>`_ and the `Product Specific Terms for NVIDIA AI Products <https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/>`_.
 
 .. toctree::
    :maxdepth: 2
@@ -50,6 +50,39 @@ The software and materials are governed by the `NVIDIA Software License Agreemen
 
    python_api/getting_started
    c_api/getting_started
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Usage
+
+   core/application_flow
+   core/renderer_configuration
+   core/async_status_errors
+
+.. toctree::
+   :maxdepth: 3
+   :titlesonly:
+   :caption: Sensors
+
+   sensors/configuration
+   sensors/sensor_outputs
+   sensors/cameras
+   sensors/nonvisual
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Scene
+
+   scene/loading_usd
+   scene/stage_queries
+   scene/attributes
+   scene/transforms
+   scene/attribute_bindings
+   scene/attribute_mapping
+   scene/cloning
+   scene/material_binding
+   scene/semantic_labels
+   scene/picking
 
 .. toctree::
    :maxdepth: 2
@@ -67,6 +100,7 @@ The software and materials are governed by the `NVIDIA Software License Agreemen
    :maxdepth: 2
    :caption: C API
 
+   c_api/practical_patterns
    c_api/index
 
 .. toctree::
@@ -74,7 +108,7 @@ The software and materials are governed by the `NVIDIA Software License Agreemen
 
    GitHub Repository <https://github.com/NVIDIA-Omniverse/ovrtx>
 
-Indices and tables
+Indices and Tables
 ==================
 
 * :ref:`genindex`

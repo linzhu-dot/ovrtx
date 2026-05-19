@@ -15,7 +15,7 @@ Omniverse RTX provides real-time, physically accurate sensor simulation and rend
 ![warehouse](img/warehouse.jpg)
 
 ## Features
-* Physically accurate simulation of cameras, lidar, radar, ultrasonic and more sensors.
+* Physically accurate simulation of cameras, lidar, radar, and other sensors.
 * Scalable simulation performance from reinforcement learning in-the-loop with tens of thousands of frames per second, through real-time, photorealistic, interactive viewport and navigation, to offline predictive rendering.
 * [OpenUSD](https://aousd.org/) scene description allowing interchange with a vast ecosystem of content creation, CAD and simulation tools.
 * Easy integration with Python simulation and learning ecosystem.
@@ -107,6 +107,49 @@ TODO - show badges for
 The [skills](skills) directory contains a series of Skills to help AI coding agents to understand how to use the API (and they're useful for humans too). Copy this directory to your project and point your agent at it.
 
 
+## Testing
+
+Tests live under `tests/docs/` in three independent suites: Python, C, and USD validation.
+
+### Python tests (GPU required)
+
+```bash
+cd tests/docs/python
+
+# Run the full suite
+uv run pytest -v
+
+# Run a single test
+uv run pytest test_base.py::test_base -v
+uv run pytest test_base.py::test_bind_material -v
+```
+
+### C tests (GPU required)
+
+```bash
+cd tests/docs/c
+cmake -B build
+cmake --build build --config Release
+
+# Run the full suite
+cd build && ctest --output-on-failure
+
+# Run a single test
+ctest -R BaseTest.RenderLdrColor --output-on-failure
+
+# Or use the gtest binary directly
+./ovrtx_docs_tests --gtest_filter=BaseTest.BindMaterial
+```
+
+### USD validation tests (no GPU required)
+
+```bash
+cd tests/docs/usd
+uv run pytest -v
+```
+
+Rendered images are written to `_output/` under the respective suite directory.
+
 ## Documentation
 <!-- TODO - Pointer to Tutorials and API Documentation -->
 Documentation is published at https://nvidia-omniverse.github.io/ovrtx
@@ -143,6 +186,6 @@ NVIDIA Corporation
 
 ## License
 
-The software and materials are governed by the [NVIDIA Software License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/) and the [Product-Specific Terms for NVIDIA Omniverse](https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-omniverse/).
+The software and materials are governed by the [NVIDIA Software License Agreement](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/) and the [Product Specific Terms for NVIDIA AI Products](https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.

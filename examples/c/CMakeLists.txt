@@ -24,4 +24,6 @@ endif()
 
 # Include all examples
 add_subdirectory(minimal)
+add_subdirectory(status-queries)
 add_subdirectory(vulkan-interop)
+add_subdirectory(sensors)

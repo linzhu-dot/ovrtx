@@ -14,7 +14,9 @@
 #include "vk/vulkan_context.hpp"
 #include <cuda.h>
 #include <ovrtx/ovrtx.h>
+#include <ovrtx/ovrtx_attributes.h>
 #include <ovrtx/ovrtx_config.h>
+#include <ovx/path_dictionary/path_dictionary_utils.h>
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -29,26 +31,74 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 // Window dimensions
 constexpr int WINDOW_WIDTH = 1920;
 constexpr int WINDOW_HEIGHT = 1080;
+constexpr uint8_t SELECTED_OUTLINE_GROUP = 1;
+constexpr ovrtx_selection_group_style_t SELECTED_OUTLINE_STYLE = {
+    {0.462745f, 0.725490f, 0.000000f, 1.0f},
+    {0.462745f, 0.725490f, 0.000000f, 0.1f},
+};
 
-// Mouse state for orbit camera
-static bool g_mouse_pressed = false;
+// Mouse state for orbit camera and viewport picking.
+static bool g_camera_mouse_pressed = false;
 static double g_last_mouse_x = 0.0;
 static double g_last_mouse_y = 0.0;
 static bool g_camera_dirty = false;
 static OrbitCamera* g_orbit_camera = nullptr;
+
+struct PickDragState {
+    bool left_pressed = false;
+    bool dragging = false;
+    bool pending_query = false;
+    bool pending_is_drag = false;
+    double press_x = 0.0;
+    double press_y = 0.0;
+    double current_x = 0.0;
+    double current_y = 0.0;
+    double pending_start_x = 0.0;
+    double pending_start_y = 0.0;
+    double pending_end_x = 0.0;
+    double pending_end_y = 0.0;
+};
+
+struct PickQueryPixels {
+    int32_t left = 0;
+    int32_t top = 0;
+    int32_t right = 0;
+    int32_t bottom = 0;
+};
+
+struct MarqueeOverlay {
+    bool visible = false;
+    float left = 0.0f;
+    float top = 0.0f;
+    float right = 0.0f;
+    float bottom = 0.0f;
+};
+
+struct OverlayPushConstants {
+    float rect[4];
+    float viewport_size[2];
+    float pad[2];
+};
+
+static PickDragState g_pick_drag;
+static constexpr double PICK_DRAG_THRESHOLD_PIXELS = 4.0;
 
 // Scene units for distance scaling
 enum class Units { Centimeters, Meters };
@@ -94,13 +144,51 @@ static void record_rendering_state(CommandBuffer& cmd,
                                    uint32_t swapchain_image_index,
                                    ShaderHandle vert_shader,
                                    ShaderHandle frag_shader,
-                                   SampledImageHandle read_image_handle);
+                                   ShaderHandle overlay_vert_shader,
+                                   ShaderHandle overlay_frag_shader,
+                                   SampledImageHandle read_image_handle,
+                                   MarqueeOverlay const& marquee);
+static void record_marquee_overlay(CommandBuffer& cmd,
+                                   VulkanContext& vk,
+                                   ShaderHandle overlay_vert_shader,
+                                   ShaderHandle overlay_frag_shader,
+                                   MarqueeOverlay const& marquee);
+static auto current_marquee_overlay(GLFWwindow* window) -> MarqueeOverlay;
+static auto pending_pick_query_pixels(GLFWwindow* window,
+                                      int tex_width,
+                                      int tex_height) -> std::optional<PickQueryPixels>;
+static auto find_render_var_output(ovrtx_render_product_set_outputs_t const& outputs,
+                                   std::string_view render_var_name)
+    -> ovrtx_render_var_output_handle_t;
+static bool process_pick_output(ovrtx_renderer_t* renderer,
+                                path_dictionary_instance_t* path_dictionary,
+                                ovrtx_render_var_output_handle_t pick_output_handle,
+                                std::vector<std::string>& selected_prim_paths);
+static bool configure_selection_style(ovrtx_renderer_t* renderer);
+static auto read_pick_paths(ovrtx_renderer_t* renderer,
+                            path_dictionary_instance_t* path_dictionary,
+                            ovrtx_render_var_output_handle_t pick_output_handle)
+    -> std::optional<std::vector<std::string>>;
+static auto resolve_primpath(path_dictionary_instance_t* path_dictionary,
+                             ovx_primpath_t prim_path) -> std::string;
+static bool update_selection_outline(ovrtx_renderer_t* renderer,
+                                     std::vector<std::string> const& previous_selection,
+                                     std::vector<std::string> const& next_selection);
+static bool write_selection_outline_group(ovrtx_renderer_t* renderer,
+                                          std::vector<std::string> const& prim_paths,
+                                          uint8_t group_id);
+static void print_picked_prims(std::vector<std::string> const& prim_paths);
+static bool ovx_string_equals(ovx_string_t value, std::string_view expected);
+static auto find_render_var_tensor(ovrtx_render_var_output_t const& output,
+                                   std::string_view tensor_name) -> DLTensor const*;
+static auto find_render_var_param(ovrtx_render_var_output_t const& output,
+                                  std::string_view param_name) -> DLTensor const*;
 
 // Search for color output in ovrtx results, preferring HdrColor over LdrColor
 // Returns the output handle and sets the output_type
 static auto find_color_output(ovrtx_render_product_set_outputs_t const& outputs,
                               OutputType& output_type)
-    -> ovrtx_rendered_output_handle_t;
+    -> ovrtx_render_var_output_handle_t;
 
 int main(int argc, char* argv[]) {
     // Parse command-line arguments
@@ -120,16 +208,16 @@ int main(int argc, char* argv[]) {
         return 0; // Help was shown or parse error
     }
 
-    std::cerr << "USD file: " << usd_file_path << "\n";
-    std::cerr << "Render product: " << render_product_path << "\n";
-    std::cerr << "Up axis: " << (up_axis == UpAxis::Y ? "Y" : "Z") << "\n";
+    std::cerr << "USD file: " << usd_file_path << std::endl;
+    std::cerr << "Render product: " << render_product_path << std::endl;
+    std::cerr << "Up axis: " << (up_axis == UpAxis::Y ? "Y" : "Z") << std::endl;
     std::cerr << "Units: "
-              << (units == Units::Meters ? "meters" : "centimeters") << "\n";
+              << (units == Units::Meters ? "meters" : "centimeters") << std::endl;
 
     // =========================================================================
     // Initialize ovrtx
     // =========================================================================
-    std::cerr << "Initializing ovrtx...\n";
+    std::cerr << "Initializing ovrtx..." << std::endl;
 
     ovrtx_renderer_t* renderer = nullptr;
     GLFWwindow* window = nullptr;
@@ -137,30 +225,38 @@ int main(int argc, char* argv[]) {
     // ovrtx owns scene evaluation and rendering; the rest of this sample
     // bridges those results into Vulkan-presentable images.
     // [snippet:initialize-and-create-renderer]
+    ovrtx_config_entry_t ovrtx_config_entries[] = {
+        ovrtx_config_entry_selection_outline_enabled(true),
+        ovrtx_config_entry_selection_outline_width(4),
+        ovrtx_config_entry_selection_fill_mode(OVRTX_SELECTION_FILL_MODE_GROUP_FILL_COLOR),
+    };
     ovrtx_config_t ovrtx_config = {};
+    ovrtx_config.entries = ovrtx_config_entries;
+    ovrtx_config.entry_count =
+        sizeof(ovrtx_config_entries) / sizeof(ovrtx_config_entries[0]);
     ovrtx_result_t result = ovrtx_create_renderer(&ovrtx_config, &renderer);
     if (check_and_print_error(result, "create_renderer")) {
         return 1;
     }
+    if (!configure_selection_style(renderer)) {
+        ovrtx_destroy_renderer(renderer);
+        return 1;
+    }
     // [/snippet:initialize-and-create-renderer]
 
-    std::cerr << "Loading USD scene: " << usd_file_path << "\n";
-
-    // Load USD file
-    ovrtx_usd_input_t usd_input = {};
-    usd_input.usd_file_path.ptr = usd_file_path.c_str();
-    usd_input.usd_file_path.length = usd_file_path.size();
-
-    ovx_string_t prefix = {};
-    prefix.ptr = "";
-    prefix.length = 0;
+    std::cerr << "Loading USD scene: " << usd_file_path << std::endl;
+    path_dictionary_instance_t path_dictionary = {};
+    result = ovrtx_get_path_dictionary(renderer, &path_dictionary);
+    if (check_and_print_error(result, "get_path_dictionary")) {
+        ovrtx_destroy_renderer(renderer);
+        return 1;
+    }
 
     // Loading USD is asynchronous in ovrtx, so we enqueue then wait for
     // completion.
-    ovrtx_usd_handle_t usd_handle = 0;
     ovrtx_enqueue_result_t enqueue_result =
-        ovrtx_add_usd(renderer, usd_input, prefix, &usd_handle);
-    if (check_and_print_error(enqueue_result, "add_usd")) {
+        ovrtx_open_usd_from_file(renderer, {usd_file_path.c_str(), usd_file_path.size()});
+    if (check_and_print_error(enqueue_result, "open_usd_from_file")) {
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
@@ -182,19 +278,19 @@ int main(int argc, char* argv[]) {
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
-    if (check_and_print_error(result, "wait_op (add_usd)")) {
+    if (check_and_print_error(result, "wait_op (open_usd_from_file)")) {
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
 
-    std::cerr << "USD scene loaded successfully\n";
-    std::cerr << "Render product path: " << render_product_path << "\n";
+    std::cerr << "USD scene loaded successfully" << std::endl;
+    std::cerr << "Render product path: " << render_product_path << std::endl;
 
     // ovrtx creates/uses CUDA internally; we query that context so Vulkan can
     // be created on the exact same physical device for interop safety.
     CUuuid cuda_uuid;
     if (!cuda_init(&cuda_uuid)) {
-        std::cerr << "Failed to get CUDA context\n";
+        std::cerr << "Failed to get CUDA context" << std::endl;
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
@@ -239,15 +335,15 @@ int main(int argc, char* argv[]) {
 
     // Find color output (prefer HdrColor, fall back to LdrColor)
     OutputType output_type;
-    ovrtx_rendered_output_handle_t color_output_handle =
+    ovrtx_render_var_output_handle_t color_output_handle =
         find_color_output(outputs, output_type);
     if (color_output_handle == 0) {
-        std::cerr << "No color output found (HdrColor or LdrColor)\n";
+        std::cerr << "No color output found (HdrColor or LdrColor)" << std::endl;
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
-    std::cerr << "Using " << output_type_name(output_type) << " output\n";
+    std::cerr << "Using " << output_type_name(output_type) << " output" << std::endl;
 
     // Request CUDA-array mapping so ovrtx gives us a GPU-native source buffer
     // that can be copied directly into exported Vulkan memory.
@@ -255,26 +351,33 @@ int main(int argc, char* argv[]) {
     map_desc.device_type = OVRTX_MAP_DEVICE_TYPE_CUDA_ARRAY;
     map_desc.sync_stream = 0;
 
-    ovrtx_rendered_output_t rendered_output = {};
-    result = ovrtx_map_rendered_output(renderer,
+    ovrtx_render_var_output_t rendered_output = {};
+    result = ovrtx_map_render_var_output(renderer,
                                        color_output_handle,
                                        &map_desc,
                                        ovrtx_timeout_infinite,
                                        &rendered_output);
-    if (check_and_print_error(result, "map_rendered_output")) {
+    if (check_and_print_error(result, "map_render_var_output")) {
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
 
-    DLTensor const& dl = rendered_output.buffer.dl;
+    if (rendered_output.num_tensors == 0) {
+        std::cerr << "color render variable produced no tensors" << std::endl;
+        ovrtx_unmap_render_var_output(renderer, rendered_output.map_handle, ovrtx_cuda_sync_t{});
+        ovrtx_destroy_results(renderer, step_result_handle);
+        ovrtx_destroy_renderer(renderer);
+        return 1;
+    }
+    DLTensor const& dl = *rendered_output.tensors[0].dl;
     int tex_width = static_cast<int>(dl.shape[1]);
     int tex_height = static_cast<int>(dl.shape[0]);
 
     // Unmap and destroy initial step results (no copy, so no sync needed)
-    result = ovrtx_unmap_rendered_output(
+    result = ovrtx_unmap_render_var_output(
         renderer, rendered_output.map_handle, ovrtx_cuda_sync_t{});
-    if (check_and_print_error(result, "unmap_rendered_output")) {
+    if (check_and_print_error(result, "unmap_render_var_output")) {
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
@@ -286,13 +389,13 @@ int main(int argc, char* argv[]) {
     }
 
     std::cerr << "Render output dimensions: " << tex_width << " x "
-              << tex_height << "\n";
+              << tex_height << std::endl;
 
     // =========================================================================
     // Initialize GLFW and create window
     // =========================================================================
     if (!glfwInit()) {
-        std::cerr << "Failed to initialize GLFW\n";
+        std::cerr << "Failed to initialize GLFW" << std::endl;
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
@@ -303,7 +406,7 @@ int main(int argc, char* argv[]) {
     window = glfwCreateWindow(
         WINDOW_WIDTH, WINDOW_HEIGHT, "ovrtx-Vulkan Interop", nullptr, nullptr);
     if (!window) {
-        std::cerr << "Failed to create window\n";
+        std::cerr << "Failed to create window" << std::endl;
         glfwTerminate();
         ovrtx_destroy_renderer(renderer);
         return 1;
@@ -352,15 +455,29 @@ int main(int argc, char* argv[]) {
         std::filesystem::path shader_dir = get_executable_dir() / "shaders";
         std::string vert_path = (shader_dir / "fullscreen.vert.spv").string();
         std::string frag_path = (shader_dir / "fullscreen.frag.spv").string();
+        std::string overlay_vert_path =
+            (shader_dir / "overlay.vert.spv").string();
+        std::string overlay_frag_path =
+            (shader_dir / "overlay.frag.spv").string();
         std::vector<uint32_t> vert_spirv = load_spirv(vert_path);
         std::vector<uint32_t> frag_spirv = load_spirv(frag_path);
+        std::vector<uint32_t> overlay_vert_spirv =
+            load_spirv(overlay_vert_path);
+        std::vector<uint32_t> overlay_frag_spirv =
+            load_spirv(overlay_frag_path);
 
         std::cerr << "Loaded shaders: vertex=" << vert_spirv.size()
-                  << " words, fragment=" << frag_spirv.size() << " words\n";
+                  << " words, fragment=" << frag_spirv.size()
+                  << " words, overlay_vertex=" << overlay_vert_spirv.size()
+                  << " words, overlay_fragment=" << overlay_frag_spirv.size()
+                  << " words" << std::endl;
 
         auto [vert_shader, frag_shader] =
             vk.create_linked_vertex_and_fragment_shaders(vert_spirv,
                                                          frag_spirv);
+        auto [overlay_vert_shader, overlay_frag_shader] =
+            vk.create_linked_vertex_and_fragment_shaders(overlay_vert_spirv,
+                                                         overlay_frag_spirv);
 
         // CUDA writes require GENERAL layout and external queue ownership.
         for (int i = 0; i < SHARED_IMAGE_COUNT; ++i) {
@@ -387,7 +504,7 @@ int main(int argc, char* argv[]) {
                 i, memory_handle, img.size, tex_width, tex_height, cuda_format);
             if (cuda_surfaces[i] == 0) {
                 std::cerr << "Failed to import Vulkan image " << i
-                          << " into CUDA\n";
+                          << " into CUDA" << std::endl;
                 cuda_cleanup();
                 glfwDestroyWindow(window);
                 glfwTerminate();
@@ -424,14 +541,14 @@ int main(int argc, char* argv[]) {
 
         // ovrtx step state
         ovrtx_step_result_handle_t current_step_result = 0;
-        ovrtx_rendered_output_map_handle_t current_map_handle = 0;
+        ovrtx_render_var_output_map_handle_t current_map_handle = 0;
         bool has_mapped_output = false;
 
         // =====================================================================
         // Prime the first buffer so Vulkan has valid content before
         // steady-state async producer/consumer overlap begins.
         // =====================================================================
-        std::cerr << "Priming first frame...\n";
+        std::cerr << "Priming first frame..." << std::endl;
         {
             enqueue_result = ovrtx_step(
                 renderer, render_products, 0.0, &current_step_result);
@@ -469,12 +586,12 @@ int main(int argc, char* argv[]) {
                 return 2;
             }
 
-            result = ovrtx_map_rendered_output(renderer,
+            result = ovrtx_map_render_var_output(renderer,
                                                color_output_handle,
                                                &map_desc,
                                                ovrtx_timeout_infinite,
                                                &rendered_output);
-            if (check_and_print_error(result, "map_rendered_output")) {
+            if (check_and_print_error(result, "map_render_var_output")) {
                 ovrtx_destroy_results(renderer, current_step_result);
                 cuda_cleanup();
                 glfwDestroyWindow(window);
@@ -487,13 +604,13 @@ int main(int argc, char* argv[]) {
             has_mapped_output = true;
 
             CUarray cuda_array =
-                reinterpret_cast<CUarray>(rendered_output.buffer.dl.data);
+                reinterpret_cast<CUarray>(rendered_output.tensors[0].dl->data);
             CUevent wait_event = reinterpret_cast<CUevent>(
-                rendered_output.buffer.cuda_sync.wait_event);
+                rendered_output.cuda_sync.wait_event);
             int out_width =
-                static_cast<int>(rendered_output.buffer.dl.shape[1]);
+                static_cast<int>(rendered_output.tensors[0].dl->shape[1]);
             int out_height =
-                static_cast<int>(rendered_output.buffer.dl.shape[0]);
+                static_cast<int>(rendered_output.tensors[0].dl->shape[0]);
 
             // ovrtx may signal a CUDA event when its output is ready; wait on
             // that event in our stream before issuing the interop copy.
@@ -510,9 +627,9 @@ int main(int argc, char* argv[]) {
             ovrtx_cuda_sync_t copy_done_sync = {};
             copy_done_sync.wait_event =
                 reinterpret_cast<uintptr_t>(cuda_copy_done_event);
-            result = ovrtx_unmap_rendered_output(
+            result = ovrtx_unmap_render_var_output(
                 renderer, current_map_handle, copy_done_sync);
-            if (check_and_print_error(result, "unmap_rendered_output")) {
+            if (check_and_print_error(result, "unmap_render_var_output")) {
                 ovrtx_destroy_results(renderer, current_step_result);
                 cuda_cleanup();
                 glfwDestroyWindow(window);
@@ -549,6 +666,7 @@ int main(int argc, char* argv[]) {
         std::vector<double> all_cpu_times_ms;
         std::vector<double> all_vulkan_times_ms;
         std::vector<double> all_cuda_times_ms;
+        std::vector<std::string> selected_prim_paths;
 
         if (num_frames > 0) {
             all_cpu_times_ms.reserve(num_frames);
@@ -556,10 +674,10 @@ int main(int argc, char* argv[]) {
             all_cuda_times_ms.reserve(num_frames);
         }
 
-        std::cerr << "Starting render loop...\n";
+        std::cerr << "Starting render loop..." << std::endl;
         if (num_frames > 0) {
             std::cerr << "Will render " << num_frames
-                      << " frames then save out.png and exit\n";
+                      << " frames then save out.png and exit" << std::endl;
         }
 
         int total_frames = 0;
@@ -723,6 +841,30 @@ int main(int argc, char* argv[]) {
             // and makes timeline bookkeeping deterministic.
             if (!cuda_work_pending) {
                 cuEventRecord(cuda_start_event, cuda_stream);
+                bool pick_query_submitted = false;
+                std::optional<PickQueryPixels> pick_query =
+                    pending_pick_query_pixels(window, tex_width, tex_height);
+                if (pick_query) {
+                    ovrtx_pick_query_desc_t pick_desc = {};
+                    pick_desc.render_product_path = render_product_str;
+                    pick_desc.left = pick_query->left;
+                    pick_desc.top = pick_query->top;
+                    pick_desc.right = pick_query->right;
+                    pick_desc.bottom = pick_query->bottom;
+                    pick_desc.flags = 0;
+
+                    enqueue_result =
+                        ovrtx_enqueue_pick_query(renderer, &pick_desc);
+                    if (check_and_print_error(enqueue_result,
+                                              "enqueue_pick_query")) {
+                        cuda_cleanup();
+                        glfwDestroyWindow(window);
+                        glfwTerminate();
+                        ovrtx_destroy_renderer(renderer);
+                        return 1;
+                    }
+                    pick_query_submitted = true;
+                }
 
                 // Step ovrtx with real frame delta so simulation/render timing
                 // matches interactive frame pacing.
@@ -755,18 +897,34 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
 
+                if (pick_query_submitted) {
+                    ovrtx_render_var_output_handle_t pick_output_handle =
+                        find_render_var_output(outputs, OVRTX_RENDER_VAR_PICK_HIT);
+                    if (!process_pick_output(renderer,
+                                             &path_dictionary,
+                                             pick_output_handle,
+                                             selected_prim_paths)) {
+                        ovrtx_destroy_results(renderer, current_step_result);
+                        cuda_cleanup();
+                        glfwDestroyWindow(window);
+                        glfwTerminate();
+                        ovrtx_destroy_renderer(renderer);
+                        return 1;
+                    }
+                }
+
                 // Find color output (same type as detected initially)
                 OutputType frame_output_type;
                 color_output_handle =
                     find_color_output(outputs, frame_output_type);
 
                 // [snippet:map-rendered-output-cuda-array]
-                result = ovrtx_map_rendered_output(renderer,
+                result = ovrtx_map_render_var_output(renderer,
                                                    color_output_handle,
                                                    &map_desc,
                                                    ovrtx_timeout_infinite,
                                                    &rendered_output);
-                if (check_and_print_error(result, "map_rendered_output")) {
+                if (check_and_print_error(result, "map_render_var_output")) {
                     ovrtx_destroy_results(renderer, current_step_result);
                     cuda_cleanup();
                     glfwDestroyWindow(window);
@@ -779,13 +937,13 @@ int main(int argc, char* argv[]) {
                 has_mapped_output = true;
 
                 CUarray cuda_array =
-                    reinterpret_cast<CUarray>(rendered_output.buffer.dl.data);
+                    reinterpret_cast<CUarray>(rendered_output.tensors[0].dl->data);
                 CUevent wait_event = reinterpret_cast<CUevent>(
-                    rendered_output.buffer.cuda_sync.wait_event);
+                    rendered_output.cuda_sync.wait_event);
                 int out_width =
-                    static_cast<int>(rendered_output.buffer.dl.shape[1]);
+                    static_cast<int>(rendered_output.tensors[0].dl->shape[1]);
                 int out_height =
-                    static_cast<int>(rendered_output.buffer.dl.shape[0]);
+                    static_cast<int>(rendered_output.tensors[0].dl->shape[0]);
 
                 // Ensure ovrtx has finished producing the mapped CUDA array
                 // before launching the copy into external Vulkan memory.
@@ -806,10 +964,10 @@ int main(int argc, char* argv[]) {
                 ovrtx_cuda_sync_t copy_done_sync = {};
                 copy_done_sync.wait_event =
                     reinterpret_cast<uintptr_t>(cuda_copy_done_event);
-                result = ovrtx_unmap_rendered_output(
+                result = ovrtx_unmap_render_var_output(
                     renderer, current_map_handle, copy_done_sync);
                 // [/snippet:map-rendered-output-cuda-array]
-                if (check_and_print_error(result, "unmap_rendered_output")) {
+                if (check_and_print_error(result, "unmap_render_var_output")) {
                     ovrtx_destroy_results(renderer, current_step_result);
                     cuda_cleanup();
                     glfwDestroyWindow(window);
@@ -874,7 +1032,10 @@ int main(int argc, char* argv[]) {
                                    swapchain_image_index,
                                    vert_shader,
                                    frag_shader,
-                                   shared_images[read_idx]);
+                                   overlay_vert_shader,
+                                   overlay_frag_shader,
+                                   shared_images[read_idx],
+                                   current_marquee_overlay(window));
 
             cmd.image_memory_barrier(
                 vk.swapchain_image(swapchain_image_index),
@@ -938,7 +1099,7 @@ int main(int argc, char* argv[]) {
                           << "  Vulkan=" << avg_vulkan_ms
                           << "  CUDA=" << avg_cuda_ms
                           << "  FPS=" << (frame_count / elapsed_seconds)
-                          << "\n";
+                          << std::endl;
 
                 accumulated_cpu_ms = 0.0;
                 accumulated_vulkan_ms = 0.0;
@@ -964,7 +1125,7 @@ int main(int argc, char* argv[]) {
         // Save last rendered frame to PNG if --num-frames was specified
         if (num_frames > 0) {
             std::cerr << "Reading back frame from buffer " << read_idx
-                      << "...\n";
+                      << "..." << std::endl;
             std::vector<uint8_t> pixels =
                 cuda_read_surface_rgba8(read_idx,
                                         tex_width,
@@ -981,9 +1142,9 @@ int main(int argc, char* argv[]) {
                                     tex_width * 4);
             if (ok) {
                 std::cerr << "Saved out.png (" << tex_width << "x" << tex_height
-                          << ")\n";
+                          << ")" << std::endl;
             } else {
-                std::cerr << "Failed to write out.png\n";
+                std::cerr << "Failed to write out.png" << std::endl;
             }
         }
 
@@ -994,7 +1155,7 @@ int main(int argc, char* argv[]) {
         cuStreamDestroy(cuda_stream);
         cuda_cleanup();
     } catch (std::exception const& e) {
-        std::cerr << "Vulkan interop error: " << e.what() << "\n";
+        std::cerr << "Vulkan interop error: " << e.what() << std::endl;
         g_orbit_camera = nullptr;
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -1008,7 +1169,7 @@ int main(int argc, char* argv[]) {
     glfwTerminate();
     ovrtx_destroy_renderer(renderer);
 
-    std::cerr << "Done!\n";
+    std::cerr << "Done!" << std::endl;
     return 0;
 }
 
@@ -1031,11 +1192,37 @@ static auto get_executable_dir() -> std::filesystem::path {
 
 static void
 mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    (void)window;
     (void)mods;
 
-    if (button == GLFW_MOUSE_BUTTON_LEFT) {
-        g_mouse_pressed = (action == GLFW_PRESS);
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        g_camera_mouse_pressed = (action == GLFW_PRESS);
+        glfwGetCursorPos(window, &g_last_mouse_x, &g_last_mouse_y);
+    } else if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        double x = 0.0;
+        double y = 0.0;
+        glfwGetCursorPos(window, &x, &y);
+
+        if (action == GLFW_PRESS) {
+            g_pick_drag.left_pressed = true;
+            g_pick_drag.dragging = false;
+            g_pick_drag.press_x = x;
+            g_pick_drag.press_y = y;
+            g_pick_drag.current_x = x;
+            g_pick_drag.current_y = y;
+        } else if (action == GLFW_RELEASE && g_pick_drag.left_pressed) {
+            double dx = x - g_pick_drag.press_x;
+            double dy = y - g_pick_drag.press_y;
+            g_pick_drag.left_pressed = false;
+            g_pick_drag.dragging = false;
+            g_pick_drag.pending_is_drag =
+                (dx * dx + dy * dy) >=
+                (PICK_DRAG_THRESHOLD_PIXELS * PICK_DRAG_THRESHOLD_PIXELS);
+            g_pick_drag.pending_start_x = g_pick_drag.press_x;
+            g_pick_drag.pending_start_y = g_pick_drag.press_y;
+            g_pick_drag.pending_end_x = x;
+            g_pick_drag.pending_end_y = y;
+            g_pick_drag.pending_query = true;
+        }
     }
 }
 
@@ -1043,12 +1230,22 @@ static void
 cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
     (void)window;
 
-    if (g_mouse_pressed && g_orbit_camera) {
+    if (g_camera_mouse_pressed && g_orbit_camera) {
         float delta_x = static_cast<float>(xpos - g_last_mouse_x);
         float delta_y = static_cast<float>(ypos - g_last_mouse_y);
 
         g_orbit_camera->update(delta_x, delta_y);
         g_camera_dirty = true;
+    }
+
+    if (g_pick_drag.left_pressed) {
+        g_pick_drag.current_x = xpos;
+        g_pick_drag.current_y = ypos;
+        double dx = xpos - g_pick_drag.press_x;
+        double dy = ypos - g_pick_drag.press_y;
+        g_pick_drag.dragging =
+            (dx * dx + dy * dy) >=
+            (PICK_DRAG_THRESHOLD_PIXELS * PICK_DRAG_THRESHOLD_PIXELS);
     }
 
     g_last_mouse_x = xpos;
@@ -1079,20 +1276,20 @@ scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
 }
 
 static void print_usage(char const* program_name) {
-    std::cerr << "Usage: " << program_name << " [options]\n";
-    std::cerr << "\nOptions:\n";
+    std::cerr << "Usage: " << program_name << " [options]" << std::endl;
+    std::cerr << std::endl << "Options:" << std::endl;
     std::cerr << "  --usd, -u <path>          USD file path or URL (default: "
-                 "robot-ovrtx sample)\n";
+                 "robot-ovrtx sample)" << std::endl;
     std::cerr
         << "  --render-product, -r <path>  Render product prim path (default: "
-        << DEFAULT_RENDER_PRODUCT_PATH << ")\n";
-    std::cerr << "  --up-axis, -a <Y|Z>       Scene up axis (default: Z)\n";
+        << DEFAULT_RENDER_PRODUCT_PATH << ")" << std::endl;
+    std::cerr << "  --up-axis, -a <Y|Z>       Scene up axis (default: Z)" << std::endl;
     std::cerr
-        << "  --units <meters|centimeters>  Scene units (default: meters)\n";
+        << "  --units <meters|centimeters>  Scene units (default: meters)" << std::endl;
     std::cerr
         << "  --num-frames, -n <N>      Render N frames then save out.png "
-           "and exit\n";
-    std::cerr << "  --help, -h                Show this help message\n";
+           "and exit" << std::endl;
+    std::cerr << "  --help, -h                Show this help message" << std::endl;
 }
 
 static bool parse_args(int argc,
@@ -1117,19 +1314,19 @@ static bool parse_args(int argc,
             return false;
         } else if (arg == "--usd" || arg == "-u") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an argument\n";
+                std::cerr << "Error: " << arg << " requires an argument" << std::endl;
                 return false;
             }
             usd_file = argv[++i];
         } else if (arg == "--render-product" || arg == "-r") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an argument\n";
+                std::cerr << "Error: " << arg << " requires an argument" << std::endl;
                 return false;
             }
             render_product = argv[++i];
         } else if (arg == "--up-axis" || arg == "-a") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an argument\n";
+                std::cerr << "Error: " << arg << " requires an argument" << std::endl;
                 return false;
             }
             std::string val = argv[++i];
@@ -1139,12 +1336,12 @@ static bool parse_args(int argc,
                 up_axis = UpAxis::Z;
             } else {
                 std::cerr << "Error: invalid up-axis '" << val
-                          << "', must be Y or Z\n";
+                          << "', must be Y or Z" << std::endl;
                 return false;
             }
         } else if (arg == "--units") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an argument\n";
+                std::cerr << "Error: " << arg << " requires an argument" << std::endl;
                 return false;
             }
             std::string val = argv[++i];
@@ -1154,21 +1351,21 @@ static bool parse_args(int argc,
                 units = Units::Centimeters;
             } else {
                 std::cerr << "Error: invalid units '" << val
-                          << "', must be 'meters' or 'centimeters'\n";
+                          << "', must be 'meters' or 'centimeters'" << std::endl;
                 return false;
             }
         } else if (arg == "--num-frames" || arg == "-n") {
             if (i + 1 >= argc) {
-                std::cerr << "Error: " << arg << " requires an argument\n";
+                std::cerr << "Error: " << arg << " requires an argument" << std::endl;
                 return false;
             }
             num_frames = std::stoi(argv[++i]);
             if (num_frames <= 0) {
-                std::cerr << "Error: --num-frames must be a positive integer\n";
+                std::cerr << "Error: --num-frames must be a positive integer" << std::endl;
                 return false;
             }
         } else {
-            std::cerr << "Error: unknown option '" << arg << "'\n";
+            std::cerr << "Error: unknown option '" << arg << "'" << std::endl;
             print_usage(argv[0]);
             return false;
         }
@@ -1184,9 +1381,9 @@ static bool check_and_print_error(ResultT const& result,
         ovx_string_t error = ovrtx_get_last_error();
         if (error.ptr && error.length > 0) {
             std::cerr << "ovrtx " << operation << " failed: "
-                      << std::string_view(error.ptr, error.length) << "\n";
+                      << std::string_view(error.ptr, error.length) << std::endl;
         } else {
-            std::cerr << "ovrtx " << operation << " failed\n";
+            std::cerr << "ovrtx " << operation << " failed" << std::endl;
         }
         return true;
     }
@@ -1228,23 +1425,23 @@ static void print_frame_time_stats(int total_frames,
         return {min_val, max_val, mean};
     };
 
-    std::cerr << "\n=== Frame Time Statistics (" << total_frames
-              << " frames) ===\n";
+    std::cerr << std::endl << "=== Frame Time Statistics (" << total_frames
+              << " frames) ===" << std::endl;
 
     auto [cpu_min, cpu_max, cpu_mean] = compute_stats(cpu_times_ms);
     std::cerr << "CPU:    min=" << cpu_min << " ms  max=" << cpu_max
               << " ms  mean=" << cpu_mean << " ms  (n=" << cpu_times_ms.size()
-              << ")\n";
+              << ")" << std::endl;
 
     auto [vk_min, vk_max, vk_mean] = compute_stats(vulkan_times_ms);
     std::cerr << "Vulkan: min=" << vk_min << " ms  max=" << vk_max
               << " ms  mean=" << vk_mean << " ms  (n=" << vulkan_times_ms.size()
-              << ")\n";
+              << ")" << std::endl;
 
     auto [cuda_min, cuda_max, cuda_mean] = compute_stats(cuda_times_ms);
     std::cerr << "CUDA:   min=" << cuda_min << " ms  max=" << cuda_max
               << " ms  mean=" << cuda_mean << " ms  (n=" << cuda_times_ms.size()
-              << ")\n";
+              << ")" << std::endl;
 }
 
 // Record only the draw-time graphics state for presenting the already-populated
@@ -1254,7 +1451,10 @@ static void record_rendering_state(CommandBuffer& cmd,
                                    uint32_t swapchain_image_index,
                                    ShaderHandle vert_shader,
                                    ShaderHandle frag_shader,
-                                   SampledImageHandle read_image_handle) {
+                                   ShaderHandle overlay_vert_shader,
+                                   ShaderHandle overlay_frag_shader,
+                                   SampledImageHandle read_image_handle,
+                                   MarqueeOverlay const& marquee) {
     VkRenderingAttachmentInfo color_attachment = {};
     color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     color_attachment.imageView = vk.swapchain_image_view(swapchain_image_index);
@@ -1315,16 +1515,400 @@ static void record_rendering_state(CommandBuffer& cmd,
                        &tex_idx);
 
     cmd.draw(3);
+    record_marquee_overlay(
+        cmd, vk, overlay_vert_shader, overlay_frag_shader, marquee);
     cmd.end_rendering();
+}
+
+static void record_marquee_overlay(CommandBuffer& cmd,
+                                   VulkanContext& vk,
+                                   ShaderHandle overlay_vert_shader,
+                                   ShaderHandle overlay_frag_shader,
+                                   MarqueeOverlay const& marquee) {
+    if (!marquee.visible) {
+        return;
+    }
+
+    VkExtent2D extent = vk.swapchain_extent();
+    if (extent.width == 0 || extent.height == 0) {
+        return;
+    }
+
+    cmd.set_primitive_topology(VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
+    cmd.set_color_blend_enable(0, false);
+    vk.bind_shaders(overlay_vert_shader, overlay_frag_shader);
+
+    OverlayPushConstants push = {};
+    push.rect[0] = marquee.left;
+    push.rect[1] = marquee.top;
+    push.rect[2] = marquee.right;
+    push.rect[3] = marquee.bottom;
+    push.viewport_size[0] = static_cast<float>(extent.width);
+    push.viewport_size[1] = static_cast<float>(extent.height);
+    cmd.push_constants(vk.pipeline_layout(),
+                       VK_SHADER_STAGE_VERTEX_BIT,
+                       0,
+                       sizeof(push),
+                       &push);
+    cmd.draw(5);
+}
+
+static auto window_to_framebuffer_point(GLFWwindow* window,
+                                        double x,
+                                        double y)
+    -> std::optional<std::pair<double, double>> {
+    int window_width = 0;
+    int window_height = 0;
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetWindowSize(window, &window_width, &window_height);
+    glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+    if (window_width <= 0 || window_height <= 0 || framebuffer_width <= 0 ||
+        framebuffer_height <= 0) {
+        return std::nullopt;
+    }
+
+    double scale_x =
+        static_cast<double>(framebuffer_width) / static_cast<double>(window_width);
+    double scale_y = static_cast<double>(framebuffer_height) /
+                     static_cast<double>(window_height);
+    return std::make_pair(x * scale_x, y * scale_y);
+}
+
+static auto current_marquee_overlay(GLFWwindow* window) -> MarqueeOverlay {
+    MarqueeOverlay marquee = {};
+    if (!g_pick_drag.left_pressed || !g_pick_drag.dragging) {
+        return marquee;
+    }
+
+    auto press = window_to_framebuffer_point(
+        window, g_pick_drag.press_x, g_pick_drag.press_y);
+    auto current = window_to_framebuffer_point(
+        window, g_pick_drag.current_x, g_pick_drag.current_y);
+    if (!press || !current) {
+        return marquee;
+    }
+
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+    double left = std::clamp(std::min(press->first, current->first),
+                             0.0,
+                             static_cast<double>(framebuffer_width));
+    double top = std::clamp(std::min(press->second, current->second),
+                            0.0,
+                            static_cast<double>(framebuffer_height));
+    double right = std::clamp(std::max(press->first, current->first),
+                              0.0,
+                              static_cast<double>(framebuffer_width));
+    double bottom = std::clamp(std::max(press->second, current->second),
+                               0.0,
+                               static_cast<double>(framebuffer_height));
+
+    if (right <= left || bottom <= top) {
+        return marquee;
+    }
+
+    marquee.visible = true;
+    marquee.left = static_cast<float>(left);
+    marquee.top = static_cast<float>(top);
+    marquee.right = static_cast<float>(right);
+    marquee.bottom = static_cast<float>(bottom);
+    return marquee;
+}
+
+static auto pending_pick_query_pixels(GLFWwindow* window,
+                                      int tex_width,
+                                      int tex_height)
+    -> std::optional<PickQueryPixels> {
+    if (!g_pick_drag.pending_query || tex_width <= 0 || tex_height <= 0) {
+        return std::nullopt;
+    }
+
+    int window_width = 0;
+    int window_height = 0;
+    glfwGetWindowSize(window, &window_width, &window_height);
+    if (window_width <= 0 || window_height <= 0) {
+        return std::nullopt;
+    }
+
+    auto to_pixel = [window_width, window_height, tex_width, tex_height](
+                        double x, double y) -> std::pair<int32_t, int32_t> {
+        double u = std::clamp(x / static_cast<double>(window_width), 0.0, 1.0);
+        double v = std::clamp(y / static_cast<double>(window_height), 0.0, 1.0);
+        int32_t px = static_cast<int32_t>(std::floor(u * tex_width));
+        int32_t py = static_cast<int32_t>(std::floor(v * tex_height));
+        px = std::clamp(px, int32_t{0}, static_cast<int32_t>(tex_width - 1));
+        py = std::clamp(py, int32_t{0}, static_cast<int32_t>(tex_height - 1));
+        return {px, py};
+    };
+
+    double end_x =
+        g_pick_drag.pending_is_drag ? g_pick_drag.pending_end_x
+                                    : g_pick_drag.pending_start_x;
+    double end_y =
+        g_pick_drag.pending_is_drag ? g_pick_drag.pending_end_y
+                                    : g_pick_drag.pending_start_y;
+    auto [x0, y0] =
+        to_pixel(g_pick_drag.pending_start_x, g_pick_drag.pending_start_y);
+    auto [x1, y1] = to_pixel(end_x, end_y);
+
+    PickQueryPixels query = {};
+    query.left = std::min(x0, x1);
+    query.top = std::min(y0, y1);
+    query.right =
+        std::min(std::max(x0, x1) + 1, static_cast<int32_t>(tex_width));
+    query.bottom =
+        std::min(std::max(y0, y1) + 1, static_cast<int32_t>(tex_height));
+    g_pick_drag.pending_query = false;
+    return query;
+}
+
+static auto find_render_var_output(ovrtx_render_product_set_outputs_t const& outputs,
+                                   std::string_view render_var_name)
+    -> ovrtx_render_var_output_handle_t {
+    for (size_t i = 0; i < outputs.output_count; ++i) {
+        ovrtx_render_product_output_t const& product_output =
+            outputs.outputs[i];
+        for (size_t f = 0; f < product_output.output_frame_count; ++f) {
+            ovrtx_render_product_frame_output_t const& frame =
+                product_output.output_frames[f];
+            for (size_t v = 0; v < frame.render_var_count; ++v) {
+                ovrtx_render_product_render_var_output_t const& var =
+                    frame.output_render_vars[v];
+                if (ovx_string_equals(var.render_var_name, render_var_name)) {
+                    return var.output_handle;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+static bool process_pick_output(ovrtx_renderer_t* renderer,
+                                path_dictionary_instance_t* path_dictionary,
+                                ovrtx_render_var_output_handle_t pick_output_handle,
+                                std::vector<std::string>& selected_prim_paths) {
+    std::optional<std::vector<std::string>> picked_paths =
+        read_pick_paths(renderer, path_dictionary, pick_output_handle);
+    if (!picked_paths) {
+        return false;
+    }
+
+    print_picked_prims(*picked_paths);
+    std::vector<std::string> previous_selection = selected_prim_paths;
+    if (!update_selection_outline(
+            renderer, previous_selection, *picked_paths)) {
+        return false;
+    }
+
+    selected_prim_paths = *picked_paths;
+    return true;
+}
+
+static auto read_pick_paths(ovrtx_renderer_t* renderer,
+                            path_dictionary_instance_t* path_dictionary,
+                            ovrtx_render_var_output_handle_t pick_output_handle)
+    -> std::optional<std::vector<std::string>> {
+    if (pick_output_handle == OVRTX_INVALID_HANDLE) {
+        std::cerr << "ERROR: pick query produced no "
+                  << OVRTX_RENDER_VAR_PICK_HIT << " output\n";
+        return std::nullopt;
+    }
+
+    ovrtx_map_output_description_t map_desc = {};
+    map_desc.device_type = OVRTX_MAP_DEVICE_TYPE_CPU;
+
+    ovrtx_render_var_output_t pick_output = {};
+    ovrtx_result_t result = ovrtx_map_render_var_output(renderer,
+                                                        pick_output_handle,
+                                                        &map_desc,
+                                                        ovrtx_timeout_infinite,
+                                                        &pick_output);
+    if (check_and_print_error(result, "map_pick_output")) {
+        return std::nullopt;
+    }
+
+    std::optional<std::vector<std::string>> picked_paths =
+        std::vector<std::string>{};
+    DLTensor const* prim_path_tensor =
+        find_render_var_tensor(pick_output, "primPath");
+    DLTensor const* magic_param = find_render_var_param(pick_output, "magic");
+    DLTensor const* version_param =
+        find_render_var_param(pick_output, "version");
+    DLTensor const* hit_count_param =
+        find_render_var_param(pick_output, "hitCount");
+
+    uint32_t magic = magic_param && magic_param->data ?
+        *static_cast<uint32_t const*>(magic_param->data) : 0;
+    uint32_t version = version_param && version_param->data ?
+        *static_cast<uint32_t const*>(version_param->data) : 0;
+    uint32_t hit_count = hit_count_param && hit_count_param->data ?
+        *static_cast<uint32_t const*>(hit_count_param->data) : 0;
+
+    if (magic != OVRTX_PICK_HIT_MAGIC ||
+        version != OVRTX_PICK_HIT_VERSION) {
+        std::cerr << "ERROR: unexpected pick hit schema"
+                  << " magic=0x" << std::hex << magic << std::dec
+                  << " version=" << version << "\n";
+        picked_paths = std::nullopt;
+    } else if (!prim_path_tensor || !prim_path_tensor->data ||
+               prim_path_tensor->ndim != 1 ||
+               static_cast<uint32_t>(prim_path_tensor->shape[0]) < hit_count) {
+        std::cerr << "ERROR: unexpected pick hit primPath tensor layout\n";
+        picked_paths = std::nullopt;
+    } else {
+        auto const* prim_paths =
+            static_cast<ovx_primpath_t const*>(prim_path_tensor->data);
+        for (uint32_t i = 0; i < hit_count; ++i) {
+            std::string path =
+                resolve_primpath(path_dictionary, prim_paths[i]);
+            if (!path.empty() &&
+                std::find(picked_paths->begin(), picked_paths->end(), path) ==
+                    picked_paths->end()) {
+                picked_paths->push_back(path);
+            }
+        }
+    }
+
+    ovrtx_cuda_sync_t no_sync = {};
+    result = ovrtx_unmap_render_var_output(
+        renderer, pick_output.map_handle, no_sync);
+    if (check_and_print_error(result, "unmap_pick_output")) {
+        return std::nullopt;
+    }
+
+    return picked_paths;
+}
+
+static auto resolve_primpath(path_dictionary_instance_t* path_dictionary,
+                             ovx_primpath_t prim_path) -> std::string {
+    std::array<ovx_token_t, 128> token_buffer = {};
+    ovx_token_t* tokens = nullptr;
+    size_t token_count = 0;
+    size_t path_count = 0;
+    ovx_api_result_t result =
+        path_dictionary_get_tokens_from_paths(path_dictionary,
+                                              &prim_path,
+                                              1,
+                                              token_buffer.data(),
+                                              token_buffer.size(),
+                                              &tokens,
+                                              &token_count,
+                                              &path_count);
+    if (result.status != OVX_API_SUCCESS || path_count != 1) {
+        std::cerr << "WARNING: could not resolve picked primpath id "
+                  << prim_path << "\n";
+        return {};
+    }
+
+    if (token_count == 0) {
+        return "/";
+    }
+
+    std::string path;
+    for (size_t i = 0; i < token_count; ++i) {
+        ovx_string_t token_string = {};
+        result = path_dictionary_get_strings_from_tokens(
+            path_dictionary, &tokens[i], 1, &token_string);
+        if (result.status != OVX_API_SUCCESS || !token_string.ptr) {
+            std::cerr << "WARNING: could not resolve token for picked primpath id "
+                      << prim_path << "\n";
+            return {};
+        }
+        path += "/";
+        path.append(token_string.ptr, token_string.length);
+    }
+
+    return path;
+}
+
+static bool configure_selection_style(ovrtx_renderer_t* renderer) {
+    const uint8_t group_ids[] = {SELECTED_OUTLINE_GROUP};
+    const ovrtx_selection_group_style_t styles[] = {SELECTED_OUTLINE_STYLE};
+    ovrtx_enqueue_result_t result =
+        ovrtx_set_selection_group_styles(renderer, group_ids, styles, 1);
+    return !check_and_print_error(result, "set_selection_group_styles");
+}
+
+static bool update_selection_outline(ovrtx_renderer_t* renderer,
+                                     std::vector<std::string> const& previous_selection,
+                                     std::vector<std::string> const& next_selection) {
+    if (!write_selection_outline_group(renderer, previous_selection, 0)) {
+        return false;
+    }
+    return write_selection_outline_group(renderer, next_selection, SELECTED_OUTLINE_GROUP);
+}
+
+static bool write_selection_outline_group(ovrtx_renderer_t* renderer,
+                                          std::vector<std::string> const& prim_paths,
+                                          uint8_t group_id) {
+    if (prim_paths.empty()) {
+        return true;
+    }
+
+    std::vector<ovx_string_t> path_views;
+    path_views.reserve(prim_paths.size());
+    for (std::string const& path : prim_paths) {
+        path_views.push_back({path.c_str(), path.size()});
+    }
+
+    std::vector<uint8_t> group_ids(prim_paths.size(), group_id);
+    ovrtx_enqueue_result_t result =
+        ovrtx_set_selection_outline_group(renderer,
+                                          path_views.data(),
+                                          path_views.size(),
+                                          group_ids.data());
+    return !check_and_print_error(result, "set_selection_outline_group");
+}
+
+static void print_picked_prims(std::vector<std::string> const& prim_paths) {
+    if (prim_paths.empty()) {
+        std::cerr << "Picked prims: <none>\n";
+        return;
+    }
+
+    std::cerr << "Picked prims:\n";
+    for (std::string const& path : prim_paths) {
+        std::cerr << "  " << path << "\n";
+    }
+}
+
+static bool ovx_string_equals(ovx_string_t value, std::string_view expected) {
+    return value.ptr && value.length == expected.size() &&
+           std::string_view(value.ptr, value.length) == expected;
+}
+
+static auto find_render_var_tensor(ovrtx_render_var_output_t const& output,
+                                   std::string_view tensor_name) -> DLTensor const* {
+    for (size_t i = 0; i < output.num_tensors; ++i) {
+        ovrtx_render_var_tensor_t const& tensor = output.tensors[i];
+        if (tensor.name && ovx_string_equals(*tensor.name, tensor_name)) {
+            return tensor.dl;
+        }
+    }
+    return nullptr;
+}
+
+static auto find_render_var_param(ovrtx_render_var_output_t const& output,
+                                  std::string_view param_name) -> DLTensor const* {
+    for (size_t i = 0; i < output.num_params; ++i) {
+        ovrtx_render_var_param_t const& param = output.params[i];
+        if (ovx_string_equals(param.name, param_name)) {
+            return &param.dl;
+        }
+    }
+    return nullptr;
 }
 
 // Search for color output in ovrtx results, preferring HdrColor over LdrColor
 // Returns the output handle and sets the output_type
 static auto find_color_output(ovrtx_render_product_set_outputs_t const& outputs,
                               OutputType& output_type)
-    -> ovrtx_rendered_output_handle_t {
-    ovrtx_rendered_output_handle_t hdr_handle = 0;
-    ovrtx_rendered_output_handle_t ldr_handle = 0;
+    -> ovrtx_render_var_output_handle_t {
+    ovrtx_render_var_output_handle_t hdr_handle = 0;
+    ovrtx_render_var_output_handle_t ldr_handle = 0;
 
     for (size_t i = 0; i < outputs.output_count; ++i) {
         ovrtx_render_product_output_t const& product_output =
@@ -1339,13 +1923,9 @@ static auto find_color_output(ovrtx_render_product_set_outputs_t const& outputs,
                     continue;
                 }
 
-                if (strncmp(var.render_var_name.ptr,
-                            "HdrColor",
-                            var.render_var_name.length) == 0) {
+                if (ovx_string_equals(var.render_var_name, "HdrColor")) {
                     hdr_handle = var.output_handle;
-                } else if (strncmp(var.render_var_name.ptr,
-                                   "LdrColor",
-                                   var.render_var_name.length) == 0) {
+                } else if (ovx_string_equals(var.render_var_name, "LdrColor")) {
                     ldr_handle = var.output_handle;
                 }
             }

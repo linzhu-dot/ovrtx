@@ -26,11 +26,12 @@ set(_OVRTX_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 # Fetch ovrtx package from NVIDIA artifactory
 macro(ovrtx_fetch)
     find_package(ovrtx QUIET)
+
     if (ovrtx_FOUND)
         message(STATUS "found ovrtx at: ${ovrtx_DIR}")
     else()
         set(FETCHCONTENT_QUIET FALSE)
-        
+
         # Override FetchContent's base directory to share large deps among examples.
         # Uses the directory where ovrtx.cmake lives, ensuring all examples share the same _deps.
         # If copying this project to your own workspace, delete this line or override it.
@@ -41,14 +42,14 @@ macro(ovrtx_fetch)
         # Platform-specific package selection
         if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
             set(OVRTX_PACKAGE_SYSTEM "windows-x86_64")
-            set(OVRTX_HASH "aa9aa3768926adcaa4066cd84b10f28b05d579dbfdaed5260a8fa63b8a65aef1")
+            set(OVRTX_HASH "7fe420790fcd4c0a8609cadba73c7bb03a30fa47cd4ab7f130e3cf92a972063a")
         elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
                 set(OVRTX_PACKAGE_SYSTEM "manylinux_2_35_aarch64")
-                set(OVRTX_HASH "b2a6ac57b70b2d039cce06a0b99da07e1273494edce73bf0314bfdfb20d34a6d")
+                set(OVRTX_HASH "c0236bac497f720c251485891d72b1a57e75ca38ad5aa2350adcd3d948e44056")
             elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
                 set(OVRTX_PACKAGE_SYSTEM "manylinux_2_35_x86_64")
-                set(OVRTX_HASH "d5bab8ddd375194dd378499230828bcc0718b69197628f457c84bdcb1f1d3213")
+                set(OVRTX_HASH "5569e44b18d2d39f23f374c9352dac9c87b8115892209c243c98732085f1d5f9")
             else()
                 message(FATAL_ERROR "Unsupported system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}")
             endif()
@@ -60,14 +61,15 @@ macro(ovrtx_fetch)
 
         FetchContent_Declare(
             ovrtx
-            URL "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.2.0/ovrtx@0.2.0.280040.ac9618b8.${OVRTX_PACKAGE_SYSTEM}.zip"
-            URL_HASH SHA256=${OVRTX_HASH}
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+            URL "https://github.com/NVIDIA-Omniverse/ovrtx/releases/download/v0.3.0/ovrtx@0.3.0.312915.cec773e1.${OVRTX_PACKAGE_SYSTEM}.zip"
+            URL_HASH SHA256=${OVRTX_HASH}
         )
 
 
+
         FetchContent_MakeAvailable(ovrtx)
-        
+
         # Make ovrtx findable by find_package
         list(APPEND CMAKE_PREFIX_PATH ${ovrtx_SOURCE_DIR})
 

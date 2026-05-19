@@ -28,9 +28,9 @@ static bool check_and_print_error(ResultT const& result,
         ovx_string_t error = ovrtx_get_last_error();
         if (error.ptr && error.length > 0) {
             std::cerr << "ovrtx " << operation << " failed: "
-                      << std::string_view(error.ptr, error.length) << "\n";
+                      << std::string_view(error.ptr, error.length) << std::endl;
         } else {
-            std::cerr << "ovrtx " << operation << " failed\n";
+            std::cerr << "ovrtx " << operation << " failed" << std::endl;
         }
         return true;
     }
@@ -39,7 +39,7 @@ static bool check_and_print_error(ResultT const& result,
 // [/snippet:check-error-helper]
 
 // Find the handle of the given output in the given set of outputs
-static ovrtx_rendered_output_handle_t
+static ovrtx_render_var_output_handle_t
 find_output(ovrtx_render_product_set_outputs_t const& outputs, char const* output_to_find);
 
 int main() {
@@ -50,12 +50,12 @@ int main() {
     // Create the renderer, optionally providing configuration settings.
     // In this case we need no configuration.
     ovrtx_config_t config {};
-    std::cerr << "Creating renderer. The first run of the application will take some time as shaders are compiled and cached...\n";
+    std::cerr << "Creating renderer. The first run of the application will take some time as shaders are compiled and cached..." << std::endl;
     result = ovrtx_create_renderer(&config, &renderer);
     if (check_and_print_error(result, "create_renderer")) {
         return 1;
     }
-    std::cerr << "Renderer created.\n";
+    std::cerr << "Renderer created." << std::endl;
     // [/snippet:create-renderer]
 
     // [snippet:load-usd-and-wait]
@@ -69,14 +69,11 @@ int main() {
     // A real application might want to load the USD layer and traverse it to
     // find either existing RenderProducts, and/or Cameras and allow the user to
     // select which one to render, and which RenderVars to output.
-    ovrtx_usd_handle_t usd_handle{};
-    ovrtx_usd_input_t usd_input{};
     char const* usd_url = "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Samples/Robot-OVRTX/robot-ovrtx.usda";
-    usd_input.usd_file_path = {usd_url, strlen(usd_url)};
 
-    std::cerr << "Adding " << usd_url << " at root...\n";
+    std::cerr << "Adding " << usd_url << " at root..." << std::endl;
     ovrtx_enqueue_result_t enqueue_result =
-        ovrtx_add_usd(renderer, usd_input, {"", 0}, &usd_handle);
+        ovrtx_open_usd_from_file(renderer, {usd_url, strlen(usd_url)});
 
     // This operation is asynchronous as loading the USD may take a long time.
     // We'll just poll every 100ms till it's done.
@@ -91,7 +88,7 @@ int main() {
                         &wait_result).status == OVRTX_API_TIMEOUT) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    std::cerr << "USD loaded.\n";
+    std::cerr << "USD loaded." << std::endl;
     // [/snippet:load-usd-and-wait]
 
     // [snippet:step-renderer]
@@ -110,7 +107,7 @@ int main() {
     render_products.render_products = &render_product_str;
     render_products.num_render_products = 1;
 
-    std::cerr << "Stepping renderer...\n";
+    std::cerr << "Stepping renderer..." << std::endl;
     ovrtx_step_result_handle_t step_result_handle = 0;
     enqueue_result =
         ovrtx_step(renderer, render_products, 1.0 / 60.0, &step_result_handle);
@@ -129,11 +126,11 @@ int main() {
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
-    std::cerr << "Stepped renderer.\n";
+    std::cerr << "Stepped renderer." << std::endl;
     // [/snippet:step-renderer]
 
     // [snippet:fetch-results]
-    std::cerr << "Fetching results...\n";
+    std::cerr << "Fetching results..." << std::endl;
     ovrtx_render_product_set_outputs_t outputs = {};
     result = ovrtx_fetch_results(
         renderer, step_result_handle, ovrtx_timeout_infinite, &outputs);
@@ -144,35 +141,52 @@ int main() {
     }
 
     // Find LdrColor in outputs
-    ovrtx_rendered_output_handle_t ldrcolor_output_handle =
+    ovrtx_render_var_output_handle_t ldrcolor_output_handle =
         find_output(outputs, "LdrColor");
     if (ldrcolor_output_handle == -1) {
-        std::cerr << "LdrColor output not found\n";
+        std::cerr << "LdrColor output not found" << std::endl;
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
-    std::cerr << "Fetched results.\n";
+    std::cerr << "Fetched results." << std::endl;
     // [/snippet:fetch-results]
 
     // [snippet:map-rendered-output-cpu]
     // Map rendered output so that it can be accessed on the CPU
     ovrtx_map_output_description_t map_desc = {};
     map_desc.device_type = OVRTX_MAP_DEVICE_TYPE_CPU;
-    ovrtx_rendered_output_t rendered_output = {};
-    result = ovrtx_map_rendered_output(renderer,
+    ovrtx_render_var_output_t rendered_output = {};
+    result = ovrtx_map_render_var_output(renderer,
                                        ldrcolor_output_handle,
                                        &map_desc,
                                        ovrtx_timeout_infinite,
                                        &rendered_output);
-    if (check_and_print_error(result, "map_rendered_output")) {
+    if (check_and_print_error(result, "map_render_var_output")) {
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
     }
 
-    // The output is returned as a DLTensor
-    DLTensor const& tensor = rendered_output.buffer.dl;
+    // LdrColor is a single-tensor render variable; read tensors[0].
+    // Image outputs follow shape [H, W, C] with dtype.lanes == 1.
+    if (rendered_output.num_tensors != 1) {
+        std::cerr << "Unexpected LdrColor render variable: expected 1 tensor, got " << rendered_output.num_tensors << "." << std::endl;
+        ovrtx_cuda_sync_t no_sync = {};
+        ovrtx_unmap_render_var_output(renderer, rendered_output.map_handle, no_sync);
+        ovrtx_destroy_results(renderer, step_result_handle);
+        ovrtx_destroy_renderer(renderer);
+        return 1;
+    }
+    DLTensor const& tensor = *rendered_output.tensors[0].dl;
+    if (tensor.ndim != 3 || !tensor.shape || tensor.shape[2] != 4 || tensor.dtype.lanes != 1) {
+        std::cerr << "Unexpected LdrColor tensor layout. Expected [H, W, 4] and dtype.lanes == 1." << std::endl;
+        ovrtx_cuda_sync_t no_sync = {};
+        ovrtx_unmap_render_var_output(renderer, rendered_output.map_handle, no_sync);
+        ovrtx_destroy_results(renderer, step_result_handle);
+        ovrtx_destroy_renderer(renderer);
+        return 1;
+    }
     int width = static_cast<int>(tensor.shape[1]);
     int height = static_cast<int>(tensor.shape[0]);
     stbi_write_png("out.png",
@@ -186,9 +200,9 @@ int main() {
     // [snippet:unmap-and-cleanup]
     // Unmap output
     ovrtx_cuda_sync_t no_sync = {};
-    result = ovrtx_unmap_rendered_output(
+    result = ovrtx_unmap_render_var_output(
         renderer, rendered_output.map_handle, no_sync);
-    if (check_and_print_error(result, "unmap_rendered_output")) {
+    if (check_and_print_error(result, "unmap_render_var_output")) {
         ovrtx_destroy_results(renderer, step_result_handle);
         ovrtx_destroy_renderer(renderer);
         return 1;
@@ -206,10 +220,10 @@ int main() {
 }
 
 // [snippet:find-output-helper]
-static ovrtx_rendered_output_handle_t
+static ovrtx_render_var_output_handle_t
 find_output(ovrtx_render_product_set_outputs_t const& outputs,
             char const* output_to_find) {
-    ovrtx_rendered_output_handle_t output_handle = -1;
+    ovrtx_render_var_output_handle_t output_handle = -1;
     for (size_t i = 0; i < outputs.output_count; ++i) {
         ovrtx_render_product_output_t const& product_output =
             outputs.outputs[i];

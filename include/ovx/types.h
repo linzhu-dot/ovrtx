@@ -13,7 +13,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* Null-terminated string with explicit length */
+/**
+ * Null-terminated string with explicit length.
+ *
+ * Prefer the length field over relying on the null terminator:
+ * @code{.c}
+ * printf("%.*s\n", (int)str.length, str.ptr);
+ * @endcode
+ * @code{.cpp}
+ * std::string_view sv(str.ptr, str.length);
+ * @endcode
+ */
 typedef struct ovx_string_t
 {
     const char* ptr;

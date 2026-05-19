@@ -6,6 +6,8 @@ The example will load an example scene from S3 and output the resulting image to
 
 The first time the example is run, driver shader compilation will be performed and cached. Subsequent runs will be much faster. 
 
+> _“Create the smallest useful C/C++ example that initializes ovrtx, loads a USD scene asynchronously, waits for it, renders one camera frame, fetches and CPU-maps the color output, writes it to an image file, and releases all ovrtx resources explicitly.”_
+
 ![output](../../../img/out.jpg)
 
 
@@ -16,6 +18,7 @@ The first time the example is run, driver shader compilation will be performed a
 - `sudo apt install build-essential cmake`
 
 The ovrtx library is downloaded automatically at configure time. If ovrtx is already installed and available via `CMAKE_PREFIX_PATH`, the local installation is used instead.
+
 
 ### Building
 

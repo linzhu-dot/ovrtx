@@ -15,6 +15,14 @@ Demonstrates how to integrate ovrtx with Vulkan by sharing renders on the GPU.
 
 The example maps ovrtx outputs to CUDA arrays every frame, then copies them to CUDA-exported VkImage memory. A fullscreen quad samples the resulting textures to display the render in real time in a GLFW window. Memory access between CUDA and Vulkan is synchronized using timeline semaphores.
 
+The example also demonstrates viewport picking, marquee selection, and styled selection rendering. Left-click picks the prim under the cursor, left-drag performs marquee selection with a Vulkan overlay rectangle, selected prim paths are printed to stderr, and selected prims are highlighted with a custom outline color and translucent fill.
+
+Any scene used with picking must restrict the picked RenderProduct to CUDA-visible GPU 0 with ``uint[] deviceIds = [0]``.
+
+.. pull-quote::
+
+   *“Create a C++ interactive viewer that renders ovrtx camera output directly into a Vulkan presentation path through CUDA interop, with GPU selection, GPU image mapping, exported-image copies, explicit synchronization, double buffering, orbit camera controls, finite-frame capture, and click or marquee picking with selection outlines.”*
+
 .. image:: ../../img/example-vulkan-interop.gif
    :alt: Vulkan interop example
    :align: center
@@ -92,7 +100,9 @@ The example is configured to load the robot scene from Omniverse:
 Controls
 --------
 
-- **Left-click and drag** — Rotate camera around the target point
+- **Right-click and drag** — Rotate camera around the target point
+- **Left-click** — Pick the prim under the cursor and print its path
+- **Left-click and drag** — Marquee-select prims and print their paths
 - **Mouse wheel** — Dolly camera in/out
 
 Licensing

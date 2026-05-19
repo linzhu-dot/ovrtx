@@ -4,6 +4,12 @@ Demonstrates how to integrate ovrtx with Vulkan by sharing renders on the GPU.
 
 ovrtx outputs are mapped to CUDA arrays every frame, which are then copied to CUDA-exported VkImage memory. The resulting textures are then sampled on a fullscreen quad to display the render in real time in a GLFW window. Memory access between CUDA and Vulkan is synchronized using timeline semaphores.
 
+The sample also demonstrates ovrtx viewport picking and selection: left-click picks the prim under the cursor, left-drag performs marquee selection with a Vulkan overlay rectangle, picked prim paths are printed to stderr, and selected prims are highlighted with styled ovrtx selection outlines and translucent fill.
+
+Any scene used with picking must restrict the picked RenderProduct to CUDA-visible GPU 0 with `uint[] deviceIds = [0]`.
+
+> _“Create a C++ interactive viewer that renders ovrtx camera output directly into a Vulkan presentation path through CUDA interop, with GPU selection, GPU image mapping, exported-image copies, explicit synchronization, double buffering, orbit camera controls, finite-frame capture, and click or marquee picking with selection outlines.”_
+
 ![example-vulkan-interop](../../../img/example-vulkan-interop.gif)
 
 ## Linux
@@ -15,6 +21,7 @@ ovrtx outputs are mapped to CUDA arrays every frame, which are then copied to CU
 - [CUDA Toolkit 12.0+](https://developer.nvidia.com/cuda-downloads)
 
 If ovrtx or glfw3 are already installed and available via `CMAKE_PREFIX_PATH`, the local installations are used. Otherwise they are downloaded automatically at configure time. Other dependencies (GLM, volk, unordered_dense) are always downloaded via FetchContent.
+
 
 ### Building
 
@@ -63,7 +70,9 @@ The example is configured to load the robot scene from Omniverse:
 
 ### Controls
 
-- **Left-click and drag** — Rotate camera around the target point
+- **Right-click and drag** — Rotate camera around the target point
+- **Left-click** — Pick the prim under the cursor and print its path
+- **Left-click and drag** — Marquee-select prims and print their paths
 - **Mouse wheel** — Dolly camera in/out
 
 # Licensing

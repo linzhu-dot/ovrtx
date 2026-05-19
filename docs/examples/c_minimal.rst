@@ -17,6 +17,10 @@ The example loads an example scene from S3 and writes the resulting image to ``o
 
 The first time you run the example, the driver compiles and caches shaders. Subsequent runs are much faster.
 
+.. pull-quote::
+
+   *“Create the smallest useful C/C++ example that initializes ovrtx, loads a USD scene asynchronously, waits for it, renders one camera frame, fetches and CPU-maps the color output, writes it to an image file, and releases all ovrtx resources explicitly.”*
+
 .. image:: ../../img/out.jpg
    :alt: Minimal example output
    :align: center
